@@ -65,6 +65,7 @@ namespace LibreLancer.Client
         public double WorldTime => WorldTick * (1 / 60.0f);
 
         public bool Multiplayer => connection is GameNetClient;
+        private string autoSavePath = null;
         private bool paused = false;
 
         public uint WorldTick = 0;
@@ -92,42 +93,20 @@ namespace LibreLancer.Client
             }
         }
 
-        private const string SAVE_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
-
-        static string Encode(long number)
-        {
-            if (number < 0)
-                throw new ArgumentException();
-            var builder = new StringBuilder();
-            var divisor = (long)SAVE_ALPHABET.Length;
-            while (number > 0)
-            {
-                number = Math.DivRem(number, divisor, out var rem);
-                builder.Append(SAVE_ALPHABET[(int)rem]);
-            }
-
-            return new string(builder.ToString().Reverse().ToArray());
-        }
-
         public void Save(string description)
         {
-            var filename = $"Save0{Encode(DateTimeOffset.Now.ToUnixTimeSeconds())}.fl";
-            if (string.IsNullOrWhiteSpace(description)) description = "Save";
-            var folder = Game.GetSaveFolder();
-            var path = Path.Combine(folder, filename);
-            int i = 0;
-            while (File.Exists(path))
-            {
-                filename = $"Save0{Encode(DateTimeOffset.Now.ToUnixTimeSeconds())}{i++}.fl";
-                path = Path.Combine(folder, filename);
-            }
-
             if (connection is EmbeddedServer es)
             {
-                es.Save(description, false);
-                Game.Saves.AddFile(path);
+                Game.Saves.AddFile(es.Save(description, false));
             }
         }
+
+        void IClientPlayer.SPSetAutosave(string path)
+        {
+            autoSavePath = path;
+        }
+
+        public string AutoSavePath => autoSavePath;
 
         public CGameSession(FreelancerGame g, IPacketConnection connection)
         {
@@ -1613,6 +1592,16 @@ namespace LibreLancer.Client
             playerSessionStart = startTime;
             playerTotalTime = time;
         }
+
+        void IClientPlayer.StoryMissionFailed(int failedIds)
+        {
+            RunSync(() =>
+            {
+                gp.StoryFail(failedIds);
+                Pause();
+            });
+        }
+
 
         GameObject ObjOrPlayer(int id)
         {

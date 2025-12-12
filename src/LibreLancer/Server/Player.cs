@@ -179,6 +179,12 @@ namespace LibreLancer.Server
             Story.Advance(this);
         }
 
+        public void SPMissionFailure(int ids)
+        {
+            rpcClient.StoryMissionFailed(ids);
+        }
+
+
         public MissionRuntime MissionRuntime => msnRuntime;
 
 
@@ -311,7 +317,14 @@ namespace LibreLancer.Server
             }
         }
 
-        public void OpenSaveGame(SaveGame sg) => BeginGame(NetCharacter.OpenSaveGame(Game, sg), sg);
+        public void OpenSaveGame(SaveGame sg)
+        {
+            if (File.Exists(Path.Combine(SaveFolder, "AutoSave.fl")))
+            {
+                rpcClient.SPSetAutosave(Path.Combine(SaveFolder, "AutoSave.fl"));
+            }
+            BeginGame(NetCharacter.OpenSaveGame(Game, sg), sg);
+        }
 
         public void AddCash(long credits)
         {
@@ -876,9 +889,9 @@ namespace LibreLancer.Server
                 builder.Length - 4, 4));
         }
 
-        public Task SaveSP(string description, int ids, bool isAutoSave, DateTime? timeStamp)
+        public Task<string> SaveSP(string description, int ids, bool isAutoSave, DateTime? timeStamp)
         {
-            var completionSource = new TaskCompletionSource();
+            var completionSource = new TaskCompletionSource<string>();
             saveActions.Enqueue(() =>
             {
                 if (Character != null)
@@ -914,7 +927,12 @@ namespace LibreLancer.Server
                     }
                 }
                 IniWriter.WriteIniFile(path, sg.ToIni());
-                completionSource.SetResult();
+                completionSource.SetResult(path);
+                if (isAutoSave || ids != 0)
+                {
+                    //For the "load autosave" functionality
+                    rpcClient.SPSetAutosave(path);
+                }
             });
             return completionSource.Task;
         }
