@@ -77,6 +77,9 @@ class baseside : baseside_Designer
 	    local has_news = false
 	    local news_button = {}
 
+	    local has_mission = false
+	    local mission_button = {}
+
 	    local has_commodity = false
 	    local has_equipment = false
 	    local commodity_button = {}
@@ -88,6 +91,10 @@ class baseside : baseside_Designer
         for (index, action in ipairs(actions)) {
             local obj = NavbarAction(action.IconName)
             switch(action.IconName) {
+                case "IDS_HOTSPOT_MISSIONVENDOR":
+                    has_mission = true;
+                    mission_button = obj;
+                    break;
                 case "IDS_HOTSPOT_NEWSVENDOR":
                     has_news = true;
                     news_button = obj;
@@ -135,6 +142,10 @@ class baseside : baseside_Designer
 		    { this.Elements.nn_info, this.InfoWindow },
 			{ this.Elements.nn_playerstatus, this.PlayerStatus },
 			{ this.Elements.nn_chat, this.ChatHistory }
+	    }
+	    if (has_mission || true) {
+	        this.MissionVendor = new missionvendor();
+	        table.insert(windows, { mission_button, this.MissionVendor })
 	    }
 	    if (has_news) {
 		    this.News = new news();

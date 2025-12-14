@@ -1,0 +1,52 @@
+<Scene>
+<Panel Width="640" Height="480" Anchor="Center">
+    <!-- Background -->
+	<Panel ID="background" Width="531" X="1" Height="381" Y="23" Anchor="Center">
+	    <Panel.Background>
+	        <DisplayModel model="news_background" /> 
+	    </Panel.Background>
+	    <!-- Controls -->
+	    <Panel ID="contents" Width="531" Height="381">
+	        <Button ID="close" Style="xbutton" Anchor="TopRight" X="16" Y="14" Width="12" Height="12" />
+	        <TextBlock Y="7" Width="531" Height="50" HorizontalAlignment="Center" Strid="1835" Text="JOB BOARD" TextColor="text" TextShadow="#000000FF" VerticalAlignment="Top" TextSize="14" />
+	        <!-- Headlines -->
+	        <Panel X="28.24" Y="30" Width="297" Height="160">
+	        	<Panel.Background>
+	        		<DisplayModel model="news_headlineframe" />
+	        	</Panel.Background>
+	        	<ListBox id="mission_list" X = "10" Y = "15" Width = "277" Height="130" ItemHeight="26">
+
+	        	</ListBox>
+	        </Panel>
+	        <!-- Video -->
+	        <Panel X="335" Y="50" Width="163" Height="121">
+	        	<Panel.Border>
+	        		<DisplayModel model="news_videowindow"/>
+	        	</Panel.Border>
+	        	<TextureImage X="1" Y="1" Width="161" Height="119" id="mission_logo" Name="news_newtokyo">
+	        		<TextureImage.Background>
+	        			<DisplayColor color="black" />
+	        		</TextureImage.Background>
+	        	</TextureImage>
+	        </Panel>
+	        <!-- Article -->
+	        <Panel X="27" Y="198" Width="472" Height="148">
+	           <Panel.Border>
+	               <DisplayModel model="news_textframe" />
+	           </Panel.Border>
+	           <Panel id="mission_icon" X="4" Y="3" Width="26" Height="26">
+	           		<Panel.Background><DisplayColor color="red" /></Panel.Background>
+	           </Panel>
+	           <TextBlock id="mission_title" X="30" Y="5" Width="414" Height="23" Text="Mission Title" TextColor="text" TextShadow="black"/>
+	           <TextBlock id="mission_system" X="-138" Y="3" Width="412" Height="13" Text="System name" TextColor="text" TextShadow="black" TextSize="8"/>
+	           <TextBlock id="mission_faction_giver" X="-138" Y="15" Width="412" Height="13" Text="Faction name" TextColor="text" TextShadow="black" TextSize="8"/>
+	           <TextBlock id="mission_reward" X="50" Y="7" Width="412" Height="13" Text="$ 200.000" TextColor="text" TextShadow="black" TextSize="10" HorizontalAlignment="Right"/>
+	           <InfocardDisplay X="8" Y="35" id="news_text" Width="456" Height="106"/>
+	        </Panel>
+	    </Panel>
+	</Panel>
+	
+</Panel>
+</Scene>
+
+
