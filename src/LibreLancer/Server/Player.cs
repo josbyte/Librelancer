@@ -52,6 +52,7 @@ namespace LibreLancer.Server
         private MissionRuntime? msnRuntime;
         private PreloadObject[] msnPreload = null!;
         private readonly DynamicThn thns = new();
+        private bool jumpPending;
 
         private ConcurrentQueue<Action> saveActions = new();
 
@@ -1161,6 +1162,13 @@ namespace LibreLancer.Server
 
         public void JumpTo(string system, string target, JumperNpc[] jumpers)
         {
+            if (jumpPending)
+            {
+                FLLog.Info("Player", $"Ignoring duplicate jump request to {system} - {target}");
+                return;
+            }
+
+            jumpPending = true;
             rpcClient.StartJumpTunnel();
             FLLog.Debug("Player", $"Jumping to {system} - {target}");
 
@@ -1175,7 +1183,6 @@ namespace LibreLancer.Server
                 ;
             Game.Worlds.RequestWorld(sys, (world) =>
             {
-                Space = new SpacePlayer(world, this);
                 var obj = sys.Objects.FirstOrDefault((o) =>
                     o.Nickname.Equals(target, StringComparison.OrdinalIgnoreCase));
 
@@ -1200,11 +1207,19 @@ namespace LibreLancer.Server
                 Base = null;
                 world.EnqueueAction(() =>
                 {
-                    rpcClient.SpawnPlayer(ID, System, world.GameWorld.CrcTranslation.ToArray(), Objective, Position,
-                        Orientation, world.CurrentTick);
-                    world.SpawnPlayer(this, Position, Orientation);
-                    HandleSpaceEntry();
-                    msnRuntime?.SystemEnter(system, "Player");
+                    try
+                    {
+                        Space = new SpacePlayer(world, this);
+                        rpcClient.SpawnPlayer(ID, System, world.GameWorld.CrcTranslation.ToArray(), Objective, Position,
+                            Orientation, world.CurrentTick);
+                        world.SpawnPlayer(this, Position, Orientation);
+                        HandleSpaceEntry();
+                        msnRuntime?.SystemEnter(system, "Player");
+                    }
+                    finally
+                    {
+                        jumpPending = false;
+                    }
                 });
                 world.DelayAction(() => { world.SpawnJumpers(target, jumpers); }, 4);
             }, msnPreload);
