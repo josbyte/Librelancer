@@ -10,6 +10,12 @@ public class FormationTools
 {
     public static void EnterFormation(GameObject self, GameObject tgt, Vector3 offset)
     {
+        List<GameObject>? carriedFollowers = null;
+        if (self.Formation != null && self.Formation.LeadShip == self)
+        {
+            carriedFollowers = new List<GameObject>(self.Formation.Followers);
+        }
+
         if (self.Formation != null && self.Formation != tgt.Formation)
             self.Formation.Remove(self);
 
@@ -28,6 +34,26 @@ public class FormationTools
         if (self.TryGetComponent<AutopilotComponent>(out var ap))
         {
             ap.StartFormation();
+        }
+
+        if (carriedFollowers == null)
+            return;
+
+        foreach (var follower in carriedFollowers)
+        {
+            if (follower == tgt || follower == self ||
+                !follower.Flags.HasFlag(GameObjectFlags.Exists))
+                continue;
+
+            if (follower.Formation != null && follower.Formation != tgt.Formation)
+                follower.Formation.Remove(follower);
+
+            if (tgt.Formation != null && !tgt.Formation.Contains(follower))
+                tgt.Formation.Add(follower);
+
+            follower.Formation = tgt.Formation;
+            if (follower.TryGetComponent<AutopilotComponent>(out var followerAp))
+                followerAp.StartFormation();
         }
     }
 

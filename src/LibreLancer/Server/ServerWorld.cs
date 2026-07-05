@@ -215,8 +215,9 @@ namespace LibreLancer.Server
             {
                 if (other?.Tag is GameObject g && g.TryGetComponent<SHealthComponent>(out var health))
                 {
-                    health.DamageExplosion(missile.Missile.Explosion.HullDamage, missile.Missile.Explosion.EnergyDamage,
-                            missile.Owner, pos, missile.Missile.Explosion.Radius);
+                    GetProjectileDamage(missile.Owner, missile.Missile.Explosion.HullDamage,
+                        missile.Missile.Explosion.EnergyDamage, out var hullDamage, out var energyDamage);
+                    health.DamageExplosion(hullDamage, energyDamage, missile.Owner, pos, missile.Missile.Explosion.Radius);
                     health.OnProjectileHit(missile.Owner);
                 }
             }
@@ -505,9 +506,25 @@ namespace LibreLancer.Server
         {
             if (obj.TryGetComponent<SHealthComponent>(out var health))
             {
-                health.Damage(munition.Def.HullDamage, munition.Def.EnergyDamage, owner, child);
+                GetProjectileDamage(owner, munition.Def.HullDamage, munition.Def.EnergyDamage,
+                    out var hullDamage, out var energyDamage);
+                health.Damage(hullDamage, energyDamage, owner, child);
                 health.OnProjectileHit(owner);
             }
+        }
+
+        private static void GetProjectileDamage(GameObject owner, float hullDamage, float energyDamage,
+            out float finalHullDamage, out float finalEnergyDamage)
+        {
+            if (owner.TryGetComponent<SPlayerComponent>(out var player) && player.Player.GodDamage)
+            {
+                finalHullDamage = 99999;
+                finalEnergyDamage = 99999;
+                return;
+            }
+
+            finalHullDamage = hullDamage;
+            finalEnergyDamage = energyDamage;
         }
 
         public void RequestDock(Player player, ObjNetId id)

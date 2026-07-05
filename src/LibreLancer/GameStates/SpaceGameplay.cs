@@ -117,16 +117,18 @@ namespace LibreLancer
             this.session = session;
             sys = g.GameData.Items.Systems.Get(session.PlayerSystem)!;
             CreateHud();
-            nextObjectiveUpdate = session.CurrentObjective.Ids;
+            nextObjectiveUpdate = PopupObjectiveIds(session.CurrentObjective);
             session.ObjectiveUpdated = () =>
             {
-                nextObjectiveUpdate = session.CurrentObjective.Ids;
+                nextObjectiveUpdate = PopupObjectiveIds(session.CurrentObjective);
                 objectiveObjectsDirty = true;
             };
             session.OnUpdateInventory = session.OnUpdatePlayerShip = null; // we should clear these handlers better
             loader = new LoadingScreen(g, g.GameData.LoadSystemResources(sys)!);
             loader.Init();
         }
+
+        private static int PopupObjectiveIds(NetObjective objective) => objective.Ids > 1 ? objective.Ids : 0;
 
         private void FinishLoad()
         {

@@ -28,6 +28,7 @@ namespace LibreLancer.Missions
         public Random Random = new();
 
         public Dictionary<string, MissionLabel> Labels = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> destroyedObjects = new(StringComparer.OrdinalIgnoreCase);
         private string? activeNNObjective;
 
         public MissionRuntime(MissionScript script, Player player, uint[] triggerSave)
@@ -119,7 +120,19 @@ namespace LibreLancer.Missions
             }
 
             activeNNObjective = objective;
+            SuppressNextObjectiveCardSound = value.NameIds <= 1;
             Player.SetObjective(ToNetObjective(value), history);
+        }
+
+        public bool SuppressNextObjectiveCardSound { get; private set; }
+        private int triggerRunDepth;
+
+        public bool ConsumeObjectiveCardSoundSuppression()
+        {
+            if (!SuppressNextObjectiveCardSound)
+                return false;
+            SuppressNextObjectiveCardSound = false;
+            return true;
         }
 
         public void GiveNNObjectives()
@@ -278,6 +291,7 @@ namespace LibreLancer.Missions
                 var ac = new ActiveCondition(active, cond);
                 cond.Init(this, ac);
                 conds.Add(ac);
+                active.Satisfied[conds.Count - 1] = cond.CheckCondition(this, ac, 0);
             }
 
             active.Conditions = conds;
@@ -543,14 +557,18 @@ namespace LibreLancer.Missions
 
         public void ObjectSpawned(string ship)
         {
+            destroyedObjects.Remove(ship);
             foreach (var l in Labels.Values)
             {
                 l.Spawned(ship);
             }
         }
 
+        public bool IsObjectDestroyed(string nickname) => destroyedObjects.Contains(nickname);
+
         public void ObjectDestroyed(string nickname)
         {
+            destroyedObjects.Add(nickname);
             foreach (var l in Labels.Values)
             {
                 l.Destroyed(nickname);
@@ -604,8 +622,20 @@ namespace LibreLancer.Missions
         private void DoTrigger(ScriptedTrigger tr)
         {
             FLLog.Info("Mission", "Running trigger " + tr.Nickname);
-            foreach (var act in tr.Actions)
-                act.Invoke(this, Script);
+            if (triggerRunDepth == 0)
+                SuppressNextObjectiveCardSound = false;
+            triggerRunDepth++;
+            try
+            {
+                foreach (var act in tr.Actions)
+                    act.Invoke(this, Script);
+            }
+            finally
+            {
+                triggerRunDepth--;
+                if (triggerRunDepth == 0)
+                    SuppressNextObjectiveCardSound = false;
+            }
         }
 
         public void LineFinished(uint hash)

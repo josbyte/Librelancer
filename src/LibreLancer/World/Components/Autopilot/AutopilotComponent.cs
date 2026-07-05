@@ -49,6 +49,7 @@ namespace LibreLancer.World.Components
 
         private void Start(GotoKind kind, float maxThrottle, float gotoRadius)
         {
+            CruiseKind = kind;
             CanCruise = kind != GotoKind.GotoNoCruise;
             MaxThrottle = maxThrottle;
             GotoRadius = gotoRadius;
@@ -77,6 +78,7 @@ namespace LibreLancer.World.Components
             Start(kind, maxThrottle, gotoRadius);
         }
 
+        protected GotoKind CruiseKind;
         protected bool CanCruise;
 
         protected GameObject? TargetObject;
@@ -185,7 +187,14 @@ namespace LibreLancer.World.Components
             var myRadius = Parent.PhysicsComponent!.Body!.Collider.Radius;
             var distance = (point - Parent.PhysicsComponent.Body.Position).Length();
 
-            TriggerCruise(control, (distance - range) > 2000);
+            if (CruiseKind == GotoKind.GotoCruise)
+            {
+                control.Cruise = true;
+            }
+            else
+            {
+                TriggerCruise(control, (distance - range) > 2000);
+            }
 
             if (shouldStop && (distance - range) < 500)
             {

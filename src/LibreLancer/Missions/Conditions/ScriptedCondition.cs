@@ -9,6 +9,7 @@ using LibreLancer.Data.Schema.Missions;
 using LibreLancer.Missions.Actions;
 using LibreLancer.Missions.Events;
 using LibreLancer.Server.Components;
+using LibreLancer.World;
 
 namespace LibreLancer.Missions.Conditions;
 
@@ -723,7 +724,10 @@ public class Cnd_NPCSystemEnter : EventListenerCondition<SystemEnteredEvent>
     {
         var checking = new ConditionHashSet();
         foreach (var sh in Ships)
-            checking.Values.Add(sh);
+        {
+            if (!HasAlreadyEntered(runtime, sh))
+                checking.Values.Add(sh);
+        }
         self.Storage = checking;
     }
 
@@ -737,12 +741,27 @@ public class Cnd_NPCSystemEnter : EventListenerCondition<SystemEnteredEvent>
 
     public override bool CheckCondition(MissionRuntime runtime, ActiveCondition self, double elapsed)
     {
-        return ((ConditionHashSet)self.Storage).Values.Count == 0;
+        var checking = (ConditionHashSet)self.Storage;
+        checking.Values.RemoveWhere(runtime.IsObjectDestroyed);
+        return checking.Values.Count == 0;
     }
 
     public override void Write(IniBuilder.IniSectionBuilder section)
     {
         section.Entry("Cnd_NPCSystemEnter", Ships.Prepend(System).ToArray());
+    }
+
+    private bool HasAlreadyEntered(MissionRuntime runtime, string ship)
+    {
+        if (runtime.IsObjectDestroyed(ship))
+            return true;
+
+        if (IdEqual(ship, "Player"))
+            return IdEqual(runtime.Player.System, System);
+
+        return runtime.GetSpace(out var space) &&
+               IdEqual(space.World.System.Nickname, System) &&
+               space.World.GameWorld.GetObject(ship) != null;
     }
 }
 
@@ -1288,6 +1307,9 @@ public class Cnd_DistShip : ScriptedCondition
 
 public class Cnd_DistCircle : ScriptedCondition
 {
+    private const float DefaultCircleRadius = 300f;
+    private const float MaxTrackedStep = 2500f;
+
     public string SourceShip = null!;
     public string DestObject = null!;
 
@@ -1304,6 +1326,109 @@ public class Cnd_DistCircle : ScriptedCondition
     public override void Write(IniBuilder.IniSectionBuilder section)
     {
         section.Entry("Cnd_DistCircle", SourceShip, DestObject);
+    }
+
+    public override void Init(MissionRuntime runtime, ActiveCondition self)
+    {
+        base.Init(runtime, self);
+        self.Storage = new DistCircleState();
+    }
+
+    public override bool CheckCondition(MissionRuntime runtime, ActiveCondition self, double elapsed)
+    {
+        if (!runtime.GetSpace(out var space))
+            return false;
+        var source = ResolveObject(runtime, SourceShip);
+        var dest = space.World.GameWorld.GetObject(DestObject);
+        if (source == null || dest == null)
+            return false;
+
+        var state = (DistCircleState)self.Storage;
+        var sourceRadius = GetObjectRadius(source, 0f);
+        var destRadius = GetObjectRadius(dest, DefaultCircleRadius);
+        var triggerRadius = sourceRadius + destRadius;
+        var currentPosition = source.WorldTransform.Position;
+        var destTransform = dest.WorldTransform;
+
+        if (state.LastPosition is not { } previousPosition)
+        {
+            state.LastPosition = currentPosition;
+            return false;
+        }
+
+        var step = currentPosition - previousPosition;
+        if (step.LengthSquared() > MaxTrackedStep * MaxTrackedStep)
+        {
+            state.LastPosition = currentPosition;
+            return false;
+        }
+
+        var normal = Vector3.Transform(-Vector3.UnitZ, destTransform.Orientation);
+        if (normal.LengthSquared() < float.Epsilon)
+            normal = Vector3.UnitZ;
+        else
+            normal = Vector3.Normalize(normal);
+
+        var previousOffset = previousPosition - destTransform.Position;
+        var currentOffset = currentPosition - destTransform.Position;
+        var previousPlaneDistance = Vector3.Dot(previousOffset, normal);
+        var currentPlaneDistance = Vector3.Dot(currentOffset, normal);
+        var crossed = CrossedCircle(
+            previousPosition,
+            currentPosition,
+            previousPlaneDistance,
+            currentPlaneDistance,
+            destTransform.Position,
+            normal,
+            triggerRadius);
+
+        state.LastPosition = currentPosition;
+        return crossed;
+    }
+
+    private static float GetObjectRadius(GameObject obj, float defaultRadius)
+    {
+        var radius = MathF.Max(
+            obj.PhysicsComponent?.Body?.Collider.Radius ?? 0f,
+            obj.SystemObject?.Archetype?.SolarRadius ?? 0f);
+        return radius > 0 ? radius : defaultRadius;
+    }
+
+    private static bool CrossedCircle(Vector3 previousPosition, Vector3 currentPosition, float previousPlaneDistance,
+        float currentPlaneDistance, Vector3 center, Vector3 normal, float radius)
+    {
+        if (previousPlaneDistance * currentPlaneDistance > 0)
+            return false;
+
+        var denom = previousPlaneDistance - currentPlaneDistance;
+        if (MathF.Abs(denom) < float.Epsilon)
+            return false;
+
+        var t = previousPlaneDistance / denom;
+        if (t < 0 || t > 1)
+            return false;
+
+        var hit = Vector3.Lerp(previousPosition, currentPosition, t);
+        var offset = hit - center;
+        var radial = offset - (normal * Vector3.Dot(offset, normal));
+        return radial.LengthSquared() <= radius * radius;
+    }
+
+    private GameObject? ResolveObject(MissionRuntime runtime, string nickname)
+    {
+        if (!runtime.GetSpace(out var space))
+            return null;
+
+        if (IdEqual(nickname, "Player") &&
+            space.World.Players.TryGetValue(runtime.Player, out var playerObject))
+            return playerObject;
+
+        return space.World.GameWorld.GetObject(nickname);
+    }
+
+    private sealed class DistCircleState : ConditionStorage
+    {
+        public Vector3? LastPosition;
     }
 }
 
@@ -1537,6 +1662,13 @@ public class Cnd_BaseEnter :
 
     public Cnd_BaseEnter()
     {
+    }
+
+    public override void Init(MissionRuntime runtime, ActiveCondition self)
+    {
+        base.Init(runtime, self);
+        if (runtime.Player.Base != null && IdEqual(runtime.Player.Base, Base))
+            ((ConditionBoolean)self.Storage).Value = true;
     }
 
     protected override bool EventCheck(BaseEnteredEvent ev, MissionRuntime runtime, ActiveCondition self)

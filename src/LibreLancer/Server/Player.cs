@@ -77,6 +77,7 @@ namespace LibreLancer.Server
 
         // Respawn?
         public bool Dead = false;
+        public bool GodDamage = false;
 
         private Guid playerGuid; //:)
         public Guid AccountId => playerGuid;

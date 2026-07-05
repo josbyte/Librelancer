@@ -11,6 +11,8 @@ namespace LibreLancer.World;
 
 public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
 {
+    private const float ContinuousPathRange = 40f;
+
     public bool Active => index >= 0 && currentDirectives != null;
 
     private int index = -1;
@@ -69,6 +71,14 @@ public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
             ? currentDirectives[index + 1]
             : null;
 
+    private static bool IsContinuousPathDirective(MissionDirective? directive) =>
+        directive is GotoVecDirective or GotoSplineDirective or GotoShipDirective;
+
+    private static float GotoRange(GotoKind kind, float range, MissionDirective? nextDirective) =>
+        kind == GotoKind.GotoCruise && IsContinuousPathDirective(nextDirective)
+            ? MathF.Min(range, ContinuousPathRange)
+            : range;
+
     private void StartDirective(MissionDirective directive, GameWorld world)
     {
         splineIndex = -1;
@@ -110,7 +120,9 @@ public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
                     splineIndex = 0;
                     ap.GotoVec(EvalSpline(0, spline),
                         spline.CruiseKind,
-                        Throttle(spline.MaxThrottle));
+                        Throttle(spline.MaxThrottle),
+                        ContinuousPathRange,
+                        shouldStopAtTarget: false);
                 }
 
                 break;
@@ -123,7 +135,7 @@ public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
                         vec.Target,
                         vec.CruiseKind,
                         Throttle(vec.MaxThrottle),
-                        vec.Range,
+                        GotoRange(vec.CruiseKind, vec.Range, NextDirectiveOrNull()),
                         vec.CruiseSpeedReference,
                         vec.CruiseSpeedFullDistance,
                         vec.CruiseSpeedZeroDistance,
@@ -292,7 +304,11 @@ public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
                         if (splineIndex + 1 < 4)
                         {
                             splineIndex++;
-                            ap.GotoVec(EvalSpline(times[splineIndex], spline), spline.CruiseKind, Throttle(spline.MaxThrottle));
+                            ap.GotoVec(EvalSpline(times[splineIndex], spline),
+                                spline.CruiseKind,
+                                Throttle(spline.MaxThrottle),
+                                ContinuousPathRange,
+                                shouldStopAtTarget: false);
                         }
                         else
                         {

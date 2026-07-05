@@ -501,6 +501,9 @@ namespace LibreLancer.Missions.Actions
 
         public override void Invoke(MissionRuntime runtime, MissionScript script)
         {
+            if (Effect.Equals("ui_info_card_open", StringComparison.OrdinalIgnoreCase) &&
+                runtime.ConsumeObjectiveCardSoundSuppression())
+                return;
             runtime.Player.RpcClient.PlaySound(Effect);
         }
 

@@ -195,6 +195,8 @@ namespace LibreLancer.Missions.Actions
 
                     var quat = Orientation ?? obj.LocalTransform.Orientation;
                     obj.SetLocalTransform(new Transform3D(Position, quat));
+                    obj.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(null, runtime.Player.Space.World.GameWorld);
+                    obj.GetComponent<AutopilotComponent>()?.Cancel();
                 });
             }
             else
