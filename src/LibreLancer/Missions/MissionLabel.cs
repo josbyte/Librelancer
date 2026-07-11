@@ -50,4 +50,12 @@ public class MissionLabel
         }
     }
 
+    public void Despawned(string name)
+    {
+        if (states.ContainsKey(name))
+        {
+            states[name] = NpcState.NotSpawned;
+        }
+    }
+
 }

@@ -85,34 +85,44 @@ public class FormationTools
         }
 
         obj.Formation?.Remove(obj);
+        var lead = playerLead && player != null ? player : obj;
         ShipFormation form;
         if (formDef != null)
         {
-            form = new ShipFormation(playerLead ? player! : obj, formDef);
+            form = new ShipFormation(lead, formDef);
         }
         else
         {
             FLLog.Warning("Mission", $"Formation definition `{formation}` was not found. Falling back to a simple group.");
-            form = new ShipFormation(playerLead ? player! : obj);
-        }
-        if (playerLead && player != null)
-        {
-            form.Add(obj);
+            form = new ShipFormation(lead);
         }
 
-        obj.Formation = form;
+        lead.Formation = form;
+        if (obj != lead)
+        {
+            if (!form.Contains(obj))
+                form.Add(obj);
+            obj.Formation = form;
+        }
+        else
+        {
+            obj.Formation = form;
+        }
+
         foreach (var tgt in others)
         {
             var o = world.GetObject(tgt);
             if (o == null)
             {
+                FLLog.Warning("Mission", $"Formation target `{tgt}` was not found for `{formation}`");
                 continue;
             }
 
-            if (tgt != null)
+            if (tgt != null && o != lead)
             {
                 o.Formation?.Remove(o);
-                form.Add(o);
+                if (!form.Contains(o))
+                    form.Add(o);
                 o.Formation = form;
             }
 
@@ -122,10 +132,11 @@ public class FormationTools
             }
         }
 
-        if (player != null && !obj.Formation.Contains(player))
+        if (player != null && !form.Contains(player))
         {
             form.Add(player);
-            player.Formation = form;
         }
+        if (player != null)
+            player.Formation = form;
     }
 }

@@ -78,7 +78,12 @@ namespace LibreLancer.Server.Components
             }
             else if (directives[index] is FollowDirective followOther)
             {
-                var tgtObject = world.GetObject(followOther.Target)!;
+                var tgtObject = world.GetObject(followOther.Target);
+                if (tgtObject == null)
+                {
+                    FLLog.Warning("Player", $"Tried to follow missing object `{followOther.Target}`");
+                    return;
+                }
                 FormationTools.EnterFormation(Parent, tgtObject, followOther.Offset);
             }
         }

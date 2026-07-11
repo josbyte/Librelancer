@@ -19,6 +19,54 @@ public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
     private int splineIndex = -1;
     private MissionDirective[]? currentDirectives;
 
+    public bool TryGetDockingBase(GameWorld world, out string? baseName, out string? dockObject)
+    {
+        baseName = null;
+        dockObject = null;
+
+        if (!CheckDirective() ||
+            currentDirectives![index] is not DockDirective dock)
+        {
+            return false;
+        }
+
+        var dockTarget = world.GetObject(dock.Target);
+        if (dockTarget == null || !dockTarget.TryGetComponent<SDockableComponent>(out var dockable))
+            return false;
+
+        if (string.IsNullOrWhiteSpace(dockable.Action.Target))
+        {
+            return false;
+        }
+
+        baseName = dockable.Action.Target;
+        dockObject = dock.Target;
+        return true;
+    }
+
+    public MissionDirective[]? GetRemainingDirectivesAfterCurrent()
+    {
+        return CopyDirectivesFrom(index + 1);
+    }
+
+    public MissionDirective[]? GetDirectivesForAutoDock()
+    {
+        if (!CheckDirective())
+            return null;
+
+        return CopyDirectivesFrom(currentDirectives![index] is DockDirective ? index + 1 : index);
+    }
+
+    private MissionDirective[]? CopyDirectivesFrom(int start)
+    {
+        if (currentDirectives == null || start < 0 || start >= currentDirectives.Length)
+            return null;
+
+        var remaining = new MissionDirective[currentDirectives.Length - start];
+        Array.Copy(currentDirectives, start, remaining, 0, remaining.Length);
+        return remaining;
+    }
+
     public void SetDirectives(MissionDirective[]? directives, GameWorld world)
     {
         if (Parent.TryGetComponent<SNPCComponent>(out var npc))

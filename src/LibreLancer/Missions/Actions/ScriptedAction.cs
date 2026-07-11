@@ -8,6 +8,7 @@ using System.Globalization;
 using System.Numerics;
 using LibreLancer.Data.Ini;
 using LibreLancer.Data.Schema.Missions;
+using LibreLancer.Missions.Directives;
 using LibreLancer.Net;
 using LibreLancer.Server;
 using LibreLancer.Server.Components;
@@ -772,6 +773,30 @@ namespace LibreLancer.Missions.Actions
             }
         }
 
+        private static IEnumerable<string?> ReferencedShips(MissionDirective[]? directives)
+        {
+            if (directives == null)
+                yield break;
+
+            foreach (var directive in directives)
+            {
+                switch (directive)
+                {
+                    case FollowPlayerDirective followPlayer:
+                        foreach (var ship in followPlayer.Ships)
+                            yield return ship;
+                        break;
+                    case MakeNewFormationDirective formation:
+                        foreach (var ship in formation.Ships)
+                            yield return ship;
+                        break;
+                    case FollowDirective follow:
+                        yield return follow.Target;
+                        break;
+                }
+            }
+        }
+
         public override void Invoke(MissionRuntime runtime, MissionScript script)
         {
             MissionDirective[]? ol;
@@ -820,7 +845,11 @@ namespace LibreLancer.Missions.Actions
 
                 // Keep this ordered with mission spawn actions. On checkpoint load the
                 // object list may be issued in the same trigger that spawns its target.
-                var tgt = gw.GetObject(objectName);
+                foreach (var ship in ReferencedShips(ol))
+                    runtime.RestoreParkedNpcIfNeeded(ship, space.World);
+
+                var tgt = gw.GetObject(objectName) ??
+                          runtime.RestoreParkedNpcIfNeeded(objectName, space.World, ol);
 
                 if (tgt == null)
                 {

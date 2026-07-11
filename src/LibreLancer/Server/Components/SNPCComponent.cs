@@ -6,6 +6,7 @@ using LibreLancer.Data.Schema.Pilots;
 using LibreLancer.Data.Schema.Ships;
 using LibreLancer.Data.Schema.Solar;
 using LibreLancer.Missions;
+using LibreLancer.Missions.Directives;
 using LibreLancer.Server.Ai;
 using LibreLancer.World;
 using LibreLancer.World.Components;
@@ -65,9 +66,14 @@ namespace LibreLancer.Server.Components
             }
         }
 
-        public void Docked()
+        public bool Docked(
+            string? baseName = null,
+            string? dockObject = null,
+            MissionDirective[]? restoreDirectives = null,
+            string? restoreSystem = null)
         {
-            if (MissionRuntime != null)
+            if (MissionRuntime != null &&
+                !MissionRuntime.ParkNpcAtBase(Parent.Nickname, baseName, dockObject, restoreSystem, restoreDirectives))
             {
                 if (Parent.TryGetComponent<AutopilotComponent>(out var autopilot))
                     autopilot.Cancel();
@@ -76,9 +82,11 @@ namespace LibreLancer.Server.Components
                     steering.InThrottle = 0;
                     steering.Cruise = false;
                 }
-                return;
+                return false;
             }
+
             manager.Despawn(Parent, false);
+            return true;
         }
 
         public void Attack(GameObject tgt, GameWorld world)

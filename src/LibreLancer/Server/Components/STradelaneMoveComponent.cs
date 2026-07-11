@@ -19,11 +19,13 @@ namespace LibreLancer.Server.Components
         private const float DISRUPTION_DISTANCE = 3000;
 
         private GameObject currenttradelane;
+        private GameObject starttradelane;
         private string lane;
 
         public STradelaneMoveComponent(GameObject parent, GameObject tradelane, string lane) : base(parent)
         {
             currenttradelane = tradelane;
+            starttradelane = tradelane;
             this.lane = lane;
         }
 
@@ -214,7 +216,11 @@ namespace LibreLancer.Server.Components
 
             if (TryGetMissionRuntime(out var msn, out var isPlayer))
             {
-                msn.TradelaneExited(isPlayer ? "Player" : Parent.Nickname!, currenttradelane.Nickname!);
+                msn.TradelaneExited(
+                    isPlayer ? "Player" : Parent.Nickname!,
+                    currenttradelane.Nickname!,
+                    starttradelane.Nickname!
+                );
             }
 
             Parent.RemoveComponent(this);

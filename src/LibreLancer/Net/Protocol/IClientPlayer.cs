@@ -28,7 +28,8 @@ public interface IClientPlayer
     void OnConsoleMessage(string text);
     void SpawnMissile(int id, bool playSound, uint equip, Vector3 position, Quaternion orientation);
     void DestroyMissile(int id, bool explode);
-    void BaseEnter(string _base, NetObjective objective, NetThnInfo thns, NewsArticle[] news, SoldGood[] goods, NetSoldShip[] ships);
+    void BaseEnter(string _base, string? room, NetObjective objective, NetThnInfo thns, NewsArticle[] news,
+        SoldGood[] goods, NetSoldShip[] ships);
     void UpdateThns(NetThnInfo thns);
     void SetObjective(NetObjective objective, bool history);
     void SetManeuverLock(bool locked);
@@ -69,6 +70,7 @@ public interface IClientPlayer
 
     void UpdateAllowedDocking(AllowedDocking allowed);
 
+    void StartDocking(ObjNetId id, int index);
     void UpdateCharacterProgress(int level, long nextNetWorth);
     void UndockFrom(ObjNetId id, int index);
     void RunDirectives(MissionDirective[] directives);

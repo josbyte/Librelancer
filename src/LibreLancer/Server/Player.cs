@@ -18,6 +18,7 @@ using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Data.GameData.World;
 using LibreLancer.Data.Ini;
+using LibreLancer.Data.Schema.Missions;
 using LibreLancer.Data.Schema.Save;
 using LibreLancer.Data.Schema.Solar;
 using LibreLancer.Data.Schema.Ships;
@@ -201,6 +202,11 @@ namespace LibreLancer.Server
             Story.Advance(this);
         }
 
+        public void ClearLoadedMissionTriggers()
+        {
+            loadTriggers = [];
+        }
+
         public void ResetMissionDockingRestrictions()
         {
             if (MPlayer == null)
@@ -270,6 +276,13 @@ namespace LibreLancer.Server
                 rpcClient.UpdateThns(thns.Pack());
                 msnRuntime?.FinishRTC(rtc);
             }
+
+            var cutscene = new StoryCutsceneIni(
+                Game.GameData.Items.Ini.Freelancer.DataPath + rtc,
+                Game.GameData.VFS);
+            var relocation = cutscene.Encounters.FirstOrDefault()?.RelocatePlayer;
+            if (relocation is { Length: > 1 })
+                ForceLand(relocation[1], room: relocation[0]);
         }
 
         void IServerPlayer.StoryNPCSelect(string name, string room, string _base)
@@ -451,7 +464,7 @@ namespace LibreLancer.Server
             }
         }
 
-        private void PlayerEnterBase()
+        private void PlayerEnterBase(string? room = null)
         {
             // load base
             Space = null;
@@ -482,7 +495,7 @@ namespace LibreLancer.Server
             lock (thns)
             {
                 rpcClient.UpdateStatistics(Character.Statistics);
-                rpcClient.BaseEnter(Base!, Objective, thns.Pack(), news.ToArray(), Baseside.BaseData.SoldGoods
+                rpcClient.BaseEnter(Base!, room, Objective, thns.Pack(), news.ToArray(), Baseside.BaseData.SoldGoods
                     .Select(x => new SoldGood()
                     {
                         GoodCRC = CrcTool.FLModelCrc(x.Good.Ini.Nickname),
@@ -534,6 +547,9 @@ namespace LibreLancer.Server
             }
             else
             {
+                msnRuntime = null;
+                msnPreload = [];
+                loadTriggers = [];
                 FLLog.Debug("Mission", "No mission to load - CurrentMission is null");
             }
         }
@@ -593,7 +609,9 @@ namespace LibreLancer.Server
 
             FLLog.Debug("Story", $"{Story.CurrentStory.Nickname}, {Story.MissionNum}");
 
-            loadTriggers = sg.TriggerSave.Select(x => (uint) x.Trigger).ToArray();
+            loadTriggers = Story.CurrentMission == null
+                ? []
+                : sg.TriggerSave.Select(x => (uint) x.Trigger).ToArray();
 
             // Only load mission if we have a valid mission
             if (Story?.CurrentMission != null)
@@ -966,12 +984,16 @@ namespace LibreLancer.Server
             Story?.Update(this);
         }
 
-        public void ForceLand(string? target)
+        public void ForceLand(string? target, string? dockObject = null, string? room = null)
         {
+            var world = Space?.World;
+            world?.KeepAliveForMissionBase(target, MissionRuntime);
+            world?.EnqueueAction(() => world.AutoDockMissionNpcsAtBase(target, dockObject, MissionRuntime));
             Space?.Leave(false);
             Space = null;
             Base = target;
-            PlayerEnterBase();
+            System = Game.GameData.Items.Bases.Get(target)?.System ?? System;
+            PlayerEnterBase(room);
         }
 
         public void Despawn(int objId, bool explode)
@@ -1115,7 +1137,8 @@ namespace LibreLancer.Server
                 }
 
                 string path;
-                MissionRuntime?.WriteActiveTriggers(sg);
+                if (Story?.CurrentMission != null)
+                    MissionRuntime?.WriteActiveTriggers(sg);
 
                 if (isAutoSave)
                 {
@@ -1210,6 +1233,7 @@ namespace LibreLancer.Server
             rpcClient.StartJumpTunnel();
             FLLog.Debug("Player", $"Jumping to {system} - {target}");
 
+            var sys = Game.GameData.Items.Systems.Get(system)!;
             if (Space != null)
             {
                 msnRuntime?.SystemExit(System, "Player");
@@ -1218,8 +1242,6 @@ namespace LibreLancer.Server
 
             Space = null;
             ClearScan();
-            var sys = Game.GameData.Items.Systems.Get(system)!
-                ;
             Game.Worlds.RequestWorld(sys, (world) =>
             {
                 var obj = sys.Objects.FirstOrDefault((o) =>
@@ -1240,6 +1262,7 @@ namespace LibreLancer.Server
                     Orientation = obj.Rotation;
                     Position = Vector3.Transform(new Vector3(0, 0, 500), Orientation) +
                                obj.Position; // TODO: This is bad
+                    FLLog.Info("Player", $"Jump exit `{target}` resolved to {Position} in `{system}`");
                 }
 
                 Baseside = null;
@@ -1253,7 +1276,6 @@ namespace LibreLancer.Server
                             Orientation, world.CurrentTick);
                         var pship = world.SpawnPlayer(this, Position, Orientation);
                         world.Population.PopulateInitialAroundPlayer(pship);
-                        HandleSpaceEntry();
                         msnRuntime?.SystemEnter(system, "Player");
                     }
                     finally
@@ -1364,6 +1386,7 @@ namespace LibreLancer.Server
                     }
 
                     HandleSpaceEntry();
+                    MissionRuntime?.RestoreDockedNpcsForBase(launchBase, world);
                 });
             }, msnPreload);
         }

@@ -284,7 +284,7 @@ public partial class CGameSession : IClientPlayer
     }
 
 
-    void IClientPlayer.BaseEnter(string _base, NetObjective objective, NetThnInfo thns, NewsArticle[] news,
+    void IClientPlayer.BaseEnter(string _base, string? room, NetObjective objective, NetThnInfo thns, NewsArticle[] news,
         SoldGood[] goods, NetSoldShip[] ships)
     {
         if (enterCount > 0 && connection is EmbeddedServer es)
@@ -300,7 +300,7 @@ public partial class CGameSession : IClientPlayer
         News = news;
         Goods = goods;
         Ships = ships;
-        SceneChangeRequired();
+        SceneChangeRequired(room);
         CutsceneUpdate(thns);
     }
 
@@ -409,9 +409,16 @@ public partial class CGameSession : IClientPlayer
         RpcServer.OnLocationEnter(bse, room);
     }
 
-    private void SceneChangeRequired()
+    private void SceneChangeRequired(string? room = null)
     {
         gameplayActions.Clear();
+
+        RoomGameplay CreateRoom(string baseId)
+        {
+            var newBase = Game.GameData.Items.Bases.Get(baseId)!;
+            var baseRoom = string.IsNullOrWhiteSpace(room) ? null : newBase.Rooms.Get(room);
+            return new RoomGameplay(Game, this, baseId, baseRoom);
+        }
 
         if (PlayerBase != null)
         {
@@ -424,24 +431,27 @@ public partial class CGameSession : IClientPlayer
                     oldSpace.FadeToRoom(() =>
                     {
                         spaceGameplay = null;
-                        Game.ChangeState(new RoomGameplay(Game, this, baseId));
+                        Game.ChangeState(CreateRoom(baseId));
                     });
                 }
                 else
                 {
                     spaceGameplay = null;
-                    Game.ChangeState(new RoomGameplay(Game, this, baseId));
+                    Game.ChangeState(CreateRoom(baseId));
                 }
             }
             else
             {
-                Game.ChangeState(new RoomGameplay(Game, this, PlayerBase));
+                Game.ChangeState(CreateRoom(PlayerBase));
             }
         }
         else
         {
             Acks = default;
             processUpdatePackets = false;
+            updatePackets.Clear();
+            oldPackets.Clear();
+            moveState = new CircularBuffer<PlayerMoveState>(128);
             spaceGameplay = new SpaceGameplay(Game, this);
             Game.ChangeState(spaceGameplay);
         }

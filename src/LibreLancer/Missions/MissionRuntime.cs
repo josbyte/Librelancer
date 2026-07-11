@@ -11,6 +11,7 @@ using LibreLancer.Data.Ini;
 using LibreLancer.Data.Schema.Missions;
 using LibreLancer.Data.Schema.Save;
 using LibreLancer.Missions.Conditions;
+using LibreLancer.Missions.Directives;
 using LibreLancer.Missions.Events;
 using LibreLancer.Net;
 using LibreLancer.Server;
@@ -29,7 +30,15 @@ namespace LibreLancer.Missions
 
         public Dictionary<string, MissionLabel> Labels = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> destroyedObjects = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, DockedMissionNpc> dockedMissionNpcs = new(StringComparer.OrdinalIgnoreCase);
         private string? activeNNObjective;
+
+        private record DockedMissionNpc(
+            string Ship,
+            string Base,
+            string DockObject,
+            string? RestoreSystem,
+            MissionDirective[]? RestoreDirectives);
 
         public MissionRuntime(MissionScript script, Player player, uint[] triggerSave)
         {
@@ -78,23 +87,49 @@ namespace LibreLancer.Missions
             UpdateUiTriggers();
         }
 
-        private static NetObjective ToNetObjective(NNObjective objective) => objective.Type switch
+        private NetObjective ToNetObjective(NNObjective objective)
         {
-            NNObjectiveType.ids => new NetObjective(objective.NameIds),
-            NNObjectiveType.navmarker => new NetObjective(
-                objective.NameIds,
-                objective.ExplanationIds,
-                objective.System,
-                objective.Position
-            ),
-            NNObjectiveType.rep_inst => new NetObjective(
-                objective.NameIds,
-                objective.ExplanationIds,
-                objective.System,
-                objective.SolarNickname
-            ),
-            _ => new NetObjective()
-        };
+            var system = ResolveObjectiveSystem(objective);
+            return objective.Type switch
+            {
+                NNObjectiveType.ids => new NetObjective(objective.NameIds),
+                NNObjectiveType.navmarker => new NetObjective(
+                    objective.NameIds,
+                    objective.ExplanationIds,
+                    system,
+                    objective.Position
+                ),
+                NNObjectiveType.rep_inst => new NetObjective(
+                    objective.NameIds,
+                    objective.ExplanationIds,
+                    system,
+                    objective.SolarNickname
+                ),
+                _ => new NetObjective()
+            };
+        }
+
+        private string ResolveObjectiveSystem(NNObjective objective)
+        {
+            if (objective.Type != NNObjectiveType.rep_inst ||
+                string.IsNullOrWhiteSpace(objective.SolarNickname))
+                return objective.System;
+
+            var world = Player.Space?.World;
+            if (world?.GameWorld.GetObject(objective.SolarNickname) != null)
+                return world.System.Nickname;
+
+            if (Script.Ships.TryGetValue(objective.SolarNickname, out var ship))
+                return string.IsNullOrWhiteSpace(ship.System)
+                    ? world?.System.Nickname ?? objective.System
+                    : ship.System;
+
+            if (Script.Solars.TryGetValue(objective.SolarNickname, out var solar) &&
+                !string.IsNullOrWhiteSpace(solar.System))
+                return solar.System;
+
+            return objective.System;
+        }
 
         public void SetNNObjectiveState(string objective, bool complete)
         {
@@ -269,7 +304,11 @@ namespace LibreLancer.Missions
 
         public void ActivateTrigger(string trigger)
         {
-            var t = Script.AvailableTriggers[trigger];
+            if (!Script.AvailableTriggers.TryGetValue(trigger, out var t))
+            {
+                FLLog.Warning("Mission", $"Can't activate missing trigger '{trigger}'");
+                return;
+            }
 
             if (t.Conditions.Length == 1 && t.Conditions[0] is Cnd_True)
             {
@@ -558,10 +597,160 @@ namespace LibreLancer.Missions
         public void ObjectSpawned(string ship)
         {
             destroyedObjects.Remove(ship);
+            dockedMissionNpcs.Remove(ship);
             foreach (var l in Labels.Values)
             {
                 l.Spawned(ship);
             }
+        }
+
+        private void ObjectDespawned(string ship)
+        {
+            foreach (var l in Labels.Values)
+            {
+                l.Despawned(ship);
+            }
+        }
+
+        public bool ParkNpcAtBase(
+            string? ship,
+            string? baseName,
+            string? dockObject,
+            string? restoreSystem = null,
+            MissionDirective[]? restoreDirectives = null)
+        {
+            if (string.IsNullOrWhiteSpace(ship) ||
+                string.IsNullOrWhiteSpace(baseName) ||
+                string.IsNullOrWhiteSpace(dockObject) ||
+                !Script.Ships.ContainsKey(ship))
+            {
+                return false;
+            }
+
+            dockedMissionNpcs[ship] = new DockedMissionNpc(ship, baseName, dockObject, restoreSystem, restoreDirectives);
+            ObjectDespawned(ship);
+            FLLog.Info("Mission", $"Parked mission NPC `{ship}` at `{baseName}` via `{dockObject}`");
+            return true;
+        }
+
+        public bool HasParkedNpcsForBase(string? baseName) =>
+            !string.IsNullOrWhiteSpace(baseName) &&
+            dockedMissionNpcs.Values.Any(x => baseName.Equals(x.Base, StringComparison.OrdinalIgnoreCase));
+
+        public void RestoreDockedNpcsForBase(string? baseName, ServerWorld world)
+        {
+            if (!HasParkedNpcsForBase(baseName))
+                return;
+
+            Player.MissionWorldAction(() =>
+            {
+                var docked = dockedMissionNpcs.Values
+                    .Where(x => baseName!.Equals(x.Base, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+
+                foreach (var npc in docked)
+                {
+                    if (!dockedMissionNpcs.ContainsKey(npc.Ship))
+                        continue;
+
+                    if (npc.RestoreDirectives is not { Length: > 0 } ||
+                        !world.System.Nickname.Equals(npc.RestoreSystem, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (world.GameWorld.GetObject(npc.Ship) != null)
+                    {
+                        dockedMissionNpcs.Remove(npc.Ship);
+                        continue;
+                    }
+
+                    if (!Script.Ships.TryGetValue(npc.Ship, out var ship) ||
+                        ship.NPC == null)
+                    {
+                        dockedMissionNpcs.Remove(npc.Ship);
+                        continue;
+                    }
+
+                    if (SpawnParkedNpc(ship, npc.DockObject, npc.RestoreDirectives, world) != null)
+                    {
+                        ObjectSpawned(npc.Ship);
+                    }
+                }
+            });
+        }
+
+        public GameObject? RestoreParkedNpcIfNeeded(
+            string? shipName,
+            ServerWorld world,
+            MissionDirective[]? directives = null)
+        {
+            if (string.IsNullOrWhiteSpace(shipName) ||
+                !dockedMissionNpcs.TryGetValue(shipName, out var npc))
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(npc.RestoreSystem) &&
+                !world.System.Nickname.Equals(npc.RestoreSystem, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            if (!Script.Ships.TryGetValue(npc.Ship, out var ship) ||
+                ship.NPC == null)
+            {
+                dockedMissionNpcs.Remove(npc.Ship);
+                return null;
+            }
+
+            var restoreDirectives = directives ?? npc.RestoreDirectives;
+            var obj = SpawnParkedNpc(ship, npc.DockObject, restoreDirectives, world);
+            if (obj != null)
+                ObjectSpawned(npc.Ship);
+            return obj;
+        }
+
+        private GameObject? SpawnParkedNpc(
+            ScriptShip ship,
+            string dockObject,
+            MissionDirective[]? restoreDirectives,
+            ServerWorld world)
+        {
+            var npcDef = ship.NPC!;
+            Script.NpcShips.TryGetValue(npcDef.NpcShipArch!, out var shipArch);
+            shipArch ??= Player.Game.GameData.Items.NpcShips.Get(npcDef.NpcShipArch);
+            if (shipArch == null ||
+                !world.Server.GameData.Items.TryGetLoadout(shipArch.Loadout!, out var loadout) ||
+                loadout == null)
+            {
+                FLLog.Warning("Mission", $"Could not restore docked NPC `{ship.Nickname}`");
+                return null;
+            }
+
+            var pilot = world.Server.GameData.Items.GetPilot(shipArch.Pilot!);
+            var name = ship.RandomName
+                ? world.NPCs.RandomName(npcDef.Affiliation)
+                : new ObjectName(npcDef.IndividualName);
+
+            var obj = world.NPCs.DoSpawn(
+                name,
+                ship.Nickname,
+                npcDef.Affiliation,
+                shipArch.StateGraph ?? "FIGHTER",
+                npcDef.SpaceCostume,
+                loadout,
+                pilot,
+                ship.Position,
+                ship.Orientation,
+                dockObject,
+                0,
+                this);
+
+            obj.GetComponent<SDestroyableComponent>()!.OnKilled = () => ObjectDestroyed(ship.Nickname);
+            if (restoreDirectives != null)
+                obj.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(restoreDirectives, world.GameWorld);
+            return obj;
         }
 
         public bool IsObjectDestroyed(string nickname) => destroyedObjects.Contains(nickname);
@@ -582,9 +771,9 @@ namespace LibreLancer.Missions
             MsnEvent(new TLEnteredEvent(ship, pointA, pointB));
         }
 
-        public void TradelaneExited(string ship, string lane)
+        public void TradelaneExited(string ship, string ring, string startRing)
         {
-            MsnEvent(new TLExitedEvent(ship, lane));
+            MsnEvent(new TLExitedEvent(ship, ring, startRing));
         }
 
         public void PlayerManeuver(ManeuverType type, string target)

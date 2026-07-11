@@ -61,6 +61,19 @@ namespace LibreLancer.Server
 
         public void Despawn(GameObject obj, bool exploded)
         {
+            List<string>? remove = null;
+            foreach (var npc in missionNPCs)
+            {
+                if (npc.Value != obj)
+                    continue;
+                remove ??= [];
+                remove.Add(npc.Key);
+            }
+            if (remove != null)
+            {
+                foreach (var nickname in remove)
+                    missionNPCs.Remove(nickname);
+            }
             World.RemoveSpawnedObject(obj, exploded);
         }
 
@@ -124,6 +137,11 @@ namespace LibreLancer.Server
                 orient,
                 null, 0,
                 msn);
+            if (newObj.TryGetComponent<SHealthComponent>(out var health))
+            {
+                health.CurrentHealth = jumper.Health > 0 ? jumper.Health : health.CurrentHealth;
+                health.Invulnerable = jumper.Invulnerable;
+            }
             msn.SystemEnter(World.System.Nickname, jumper.Nickname);
             return newObj;
         }
@@ -145,6 +163,7 @@ namespace LibreLancer.Server
             bool arrivalIndexReserved = false
             )
         {
+            RemoveDuplicateMissionNpc(nickname, msn);
             var ship = World.Server.GameData.Items.Ships.Get(loadout.Archetype);
             GameObject spawnPoint = World.GameWorld.GetObject(arrivalObj)!;
             SDockableComponent? sdock = null;
@@ -231,6 +250,38 @@ namespace LibreLancer.Server
                 missionNPCs[nickname] = obj;
             }
             return obj;
+        }
+
+        private void RemoveDuplicateMissionNpc(string? nickname, MissionRuntime? msn)
+        {
+            if (string.IsNullOrWhiteSpace(nickname) || msn == null)
+                return;
+
+            if (!missionNPCs.TryGetValue(nickname, out var existing))
+            {
+                existing = World.GameWorld.GetObject(nickname);
+            }
+
+            if (existing == null)
+            {
+                missionNPCs.Remove(nickname);
+                return;
+            }
+
+            if (!existing.Flags.HasFlag(GameObjectFlags.Exists))
+            {
+                missionNPCs.Remove(nickname);
+                return;
+            }
+
+            if (!existing.TryGetComponent<SNPCComponent>(out var npc) ||
+                npc.MissionRuntime != msn)
+            {
+                return;
+            }
+
+            FLLog.Info("Mission", $"Despawning duplicate mission NPC `{nickname}` before respawn");
+            Despawn(existing, false);
         }
     }
 }

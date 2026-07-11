@@ -24,6 +24,7 @@ public class JumperNpc
     public ObjectLoadout Loadout = null!;
     public Pilot Pilot = null!;
     public StateGraph StateGraph = null!;
+    public bool Invulnerable;
 
     public static JumperNpc FromGameObject(GameObject go)
     {
@@ -55,6 +56,7 @@ public class JumperNpc
         if (go.TryGetComponent<SHealthComponent>(out var health))
         {
             npc.Health = health.CurrentHealth;
+            npc.Invulnerable = health.Invulnerable;
         }
 
         foreach (var item in go.GetComponents<EquipmentComponent>())

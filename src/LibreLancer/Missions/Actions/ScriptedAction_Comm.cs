@@ -30,6 +30,12 @@ namespace LibreLancer.Missions.Actions
 
         public override void Invoke(MissionRuntime runtime, MissionScript script)
         {
+            if (runtime.Player.Space == null)
+            {
+                FLLog.Warning("Mission", $"Act_StartDialog `{Dialog}` skipped while player is not in space");
+                return;
+            }
+
             var dlg = script.Dialogs[Dialog];
             var netdlg = new NetDlgLine[dlg.Lines.Count];
             for (int i = 0; i < dlg.Lines.Count; i++)
@@ -40,7 +46,7 @@ namespace LibreLancer.Missions.Actions
                 if (!d.Source!.Equals("Player", StringComparison.OrdinalIgnoreCase))
                 {
                     voice = Act_SendComm.GetCommVoice(script, d.Source);
-                    var o = runtime.Player.Space!.World.GameWorld.GetObject(d.Source);
+                    var o = runtime.Player.Space.World.GameWorld.GetObject(d.Source);
                     sourceId = o?.NetID ?? 0;
                 }
 

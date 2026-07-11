@@ -38,6 +38,7 @@ public class StoryProgress
 
         if (loadMission)
         {
+            player.ClearLoadedMissionTriggers();
             player.LoadMission();
         }
 

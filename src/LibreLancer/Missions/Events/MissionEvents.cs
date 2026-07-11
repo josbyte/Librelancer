@@ -7,7 +7,7 @@ public record struct SpaceEnteredEvent();
 public record struct SpaceExitedEvent();
 public record struct TLEnteredEvent(string Ship, string StartRing, string NextRing);
 
-public record struct TLExitedEvent(string Ship, string Ring);
+public record struct TLExitedEvent(string Ship, string Ring, string StartRing);
 
 public record struct ProjectileHitEvent(string Target, string Source);
 

@@ -867,17 +867,20 @@ namespace LibreLancer
                         var finishedCutscene = currentCutscene;
                         session.FinishCutscene(finishedCutscene);
 
-                        if (finishedCutscene.Encounters[0].RelocatePlayer != null)
+                        if (finishedCutscene.Encounters[0].RelocatePlayer is { Length: > 0 } relocation)
                         {
-                            var relocate = finishedCutscene.Encounters[0].RelocatePlayer!;
                             currentCutscene = null;
-                            if (relocate.Equals("Spaceflight", StringComparison.OrdinalIgnoreCase))
+                            if (relocation.Length > 1)
+                            {
+                                // RTCComplete performs cross-base relocation on the server.
+                            }
+                            else if (relocation[0].Equals("Spaceflight", StringComparison.OrdinalIgnoreCase))
                             {
                                 SendLaunch();
                             }
                             else
                             {
-                                var rm = currentBase.Rooms.Get(relocate);
+                                var rm = currentBase.Rooms.Get(relocation[0]);
                                 Game.ChangeState(new RoomGameplay(Game, session, baseId, rm));
                             }
                         }

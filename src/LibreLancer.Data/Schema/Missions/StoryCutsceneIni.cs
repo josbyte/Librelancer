@@ -44,7 +44,7 @@ public partial class StoryEncounter
     [Entry("reject")] public string? Reject;
     [Entry("mission_text_id")] public int MissionTextId;
     [Entry("nooffer_text_id")] public int NoOfferTextId;
-    [Entry("relocate_player")] public string? RelocatePlayer;
+    [Entry("relocate_player")] public string[]? RelocatePlayer;
     [Entry("start_room")] public string? StartRoom;
 }
 [ParsedSection]

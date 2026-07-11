@@ -6,9 +6,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using LibreLancer.Client.Components;
 using LibreLancer.Data;
 using LibreLancer.Data.GameData.World;
 using LibreLancer.Data.Schema.Ships;
+using LibreLancer.Net;
 using LibreLancer.World;
 using LibreLancer.World.Components;
 using DockSphereType = LibreLancer.Data.Schema.Solar.DockSphereType;
@@ -163,9 +165,21 @@ namespace LibreLancer.Server.Components
             var rad = obj.PhysicsComponent?.Body.Collider.Radius ?? 15;
             var pos = obj.WorldTransform.Position;
 
-            var hp = Parent.GetHardpoint(tlHP ?? DockPoints[i].DockSphere.Hardpoint);
-            var targetPos = (hp!.Transform * Parent.WorldTransform).Position;
+            Hardpoint? hp;
+            if (tlHP != null)
+            {
+                hp = Parent.GetHardpoint(tlHP);
+            }
+            else
+            {
+                hp = hardpoints.GetDockHardpoints(Parent, i, pos, false).LastOrDefault();
+                hp ??= Parent.GetHardpoint(DockPoints[i].DockSphere.Hardpoint);
+            }
 
+            if (hp == null)
+                return false;
+
+            var targetPos = (hp.Transform * Parent.WorldTransform).Position;
             if ((targetPos - pos).Length() < (DockPoints[i].DockSphere.Radius + rad))
             {
                 return true;
@@ -268,10 +282,40 @@ namespace LibreLancer.Server.Components
 
         private readonly List<DockingAction> activeDockings = [];
 
-        private readonly List<(GameObject Ship, int RequestedIndex, GotoKind Kind, DockSphereType Type)> dockQueue = [];
+        private class DockQueueEntry
+        {
+            public required GameObject Ship;
+            public GotoKind Kind;
+            public float PreviousThrottle;
+            public bool PreviousCruise;
+        }
+
+        private readonly List<DockQueueEntry> dockQueue = [];
 
         public bool IsQueuedForDock(GameObject ship) =>
             dockQueue.Any(x => x.Ship == ship);
+
+        public void CancelDocking(GameObject ship)
+        {
+            activeDockings.RemoveAll(x => x.Ship == ship);
+            dockQueue.RemoveAll(x => x.Ship == ship);
+            if (ship.TryGetComponent<AutopilotComponent>(out var autopilot))
+                autopilot.Cancel();
+            StopDockingShip(ship);
+        }
+
+        private void RemoveActiveDocking(DockingAction dock, int index)
+        {
+            if (index >= 0 &&
+                index < activeDockings.Count &&
+                ReferenceEquals(activeDockings[index], dock))
+            {
+                activeDockings.RemoveAt(index);
+                return;
+            }
+
+            activeDockings.Remove(dock);
+        }
 
         public void StartDock(GameObject obj, int index, GotoKind kind = GotoKind.Goto, GameWorld? world = null)
         {
@@ -289,13 +333,15 @@ namespace LibreLancer.Server.Components
             }
 
             if (Action.Kind == DockKinds.Base &&
-                !TryGetAvailableDockIndex(obj, index, out dockIndex))
+                !TryGetAvailableDockIndex(obj, out dockIndex))
             {
-                QueueDock(obj, index, kind);
+                QueueDock(obj, kind);
+                StartFormationFollowersDocking(obj, index, kind, world);
                 return;
             }
 
             StartDockNow(obj, dockIndex, kind, world);
+            StartFormationFollowersDocking(obj, index, kind, world);
         }
 
         private void StartDockNow(GameObject obj, int index, GotoKind kind, GameWorld? world)
@@ -321,25 +367,36 @@ namespace LibreLancer.Server.Components
                 TryTriggerAnimation(index, obj, world);
             }
 
+            if (obj.TryGetComponent<SPlayerComponent>(out var player) &&
+                Action.Kind == DockKinds.Base)
+            {
+                player.Player.RpcClient.StartDocking(new ObjNetId(Parent.NetID), index);
+            }
+
             if (obj.TryGetComponent<AutopilotComponent>(out var ap))
                 ap.StartDock(Parent, kind, index);
         }
 
-        private void QueueDock(GameObject ship, int requestedIndex, GotoKind kind)
+        private void QueueDock(GameObject ship, GotoKind kind)
         {
             if (activeDockings.Any(x => x.Ship == ship) || IsQueuedForDock(ship))
                 return;
 
-            var dockType = GetQueueDockType(ship, requestedIndex);
-            var entry = (ship, requestedIndex, kind, dockType);
+            var entry = new DockQueueEntry()
+            {
+                Ship = ship,
+                Kind = kind
+            };
+            PauseQueuedShip(entry);
             if (!ship.TryGetComponent<SPlayerComponent>(out _))
             {
                 dockQueue.Add(entry);
                 return;
             }
 
+            ship.GetComponent<SPlayerComponent>()!.Player.RpcClient.StopShip();
+
             var insert = dockQueue.FindIndex(x =>
-                x.Type == dockType &&
                 !x.Ship.TryGetComponent<SPlayerComponent>(out _));
             if (insert < 0)
                 dockQueue.Add(entry);
@@ -347,18 +404,47 @@ namespace LibreLancer.Server.Components
                 dockQueue.Insert(insert, entry);
         }
 
-        private bool TryGetAvailableDockIndex(GameObject ship, int requestedIndex, out int index)
+        private static void PauseQueuedShip(DockQueueEntry entry)
         {
-            index = requestedIndex;
-            if (CanUseDockIndex(ship, requestedIndex) &&
-                IsDockIndexAvailableForDocking(requestedIndex))
-                return true;
+            if (entry.Ship.TryGetComponent<AutopilotComponent>(out var autopilot))
+                autopilot.Cancel();
+            StopDockingShip(entry.Ship, entry);
+        }
 
-            if (IsDockingRingIndex(requestedIndex))
+        private static void StopDockingShip(GameObject ship, DockQueueEntry? entry = null)
+        {
+            if (ship.TryGetComponent<ShipSteeringComponent>(out var steering))
             {
-                return false;
+                if (entry != null)
+                {
+                    entry.PreviousThrottle = steering.InThrottle;
+                    entry.PreviousCruise = steering.Cruise;
+                }
+                steering.InThrottle = 0;
+                steering.Cruise = false;
             }
+            if (ship.TryGetComponent<ShipInputComponent>(out var input))
+                input.AutopilotThrottle = 0;
+            if (ship.TryGetComponent<ShipPhysicsComponent>(out var physics))
+                physics.EnginePower = 0;
+        }
 
+        private static void ResumeQueuedShip(DockQueueEntry entry)
+        {
+            if (entry.Ship.TryGetComponent<ShipSteeringComponent>(out var steering))
+            {
+                steering.InThrottle = entry.PreviousThrottle;
+                steering.Cruise = entry.PreviousCruise;
+            }
+            if (entry.Ship.TryGetComponent<ShipInputComponent>(out var input))
+                input.AutopilotThrottle = entry.PreviousThrottle;
+        }
+
+        private bool TryGetAvailableDockIndex(GameObject ship, out int index)
+        {
+            index = -1;
+            // Base docking always claims the first compatible free dock.
+            // Active dockings reserve their dock index via IsUndockIndexBusy().
             for (int i = 0; i < DockPoints.Length; i++)
             {
                 if (CanUseDockIndex(ship, i) &&
@@ -372,9 +458,6 @@ namespace LibreLancer.Server.Components
             return false;
         }
 
-        private DockSphereType GetQueueDockType(GameObject ship, int requestedIndex) =>
-            IsDockingRingIndex(requestedIndex) ? DockSphereType.ring : GetDockTypeForShip(ship);
-
         private bool IsDockIndexAvailableForDocking(int index) =>
             index >= 0 &&
             index < DockPoints.Length &&
@@ -385,25 +468,50 @@ namespace LibreLancer.Server.Components
             if (Action.Kind != DockKinds.Base)
                 return;
 
-            var i = 0;
-            while (i < dockQueue.Count)
+            for (int i = dockQueue.Count - 1; i >= 0; i--)
+            {
+                if (!dockQueue[i].Ship.Flags.HasFlag(GameObjectFlags.Exists))
+                    dockQueue.RemoveAt(i);
+            }
+
+            while (TryGetNextQueuedDock(out var queueIndex, out var dockIndex))
+            {
+                var queued = dockQueue[queueIndex];
+                dockQueue.RemoveAt(queueIndex);
+                ResumeQueuedShip(queued);
+                StartDockNow(queued.Ship, dockIndex, queued.Kind, world);
+            }
+        }
+
+        private bool TryGetNextQueuedDock(out int queueIndex, out int dockIndex)
+        {
+            queueIndex = -1;
+            dockIndex = -1;
+
+            for (int i = 0; i < dockQueue.Count; i++)
             {
                 var queued = dockQueue[i];
-                if (!queued.Ship.Flags.HasFlag(GameObjectFlags.Exists))
-                {
-                    dockQueue.RemoveAt(i);
+                if (!queued.Ship.TryGetComponent<SPlayerComponent>(out _))
                     continue;
-                }
 
-                if (!TryGetAvailableDockIndex(queued.Ship, queued.RequestedIndex, out var index))
+                if (TryGetAvailableDockIndex(queued.Ship, out dockIndex))
                 {
-                    i++;
-                    continue;
+                    queueIndex = i;
+                    return true;
                 }
-
-                dockQueue.RemoveAt(i);
-                StartDockNow(queued.Ship, index, queued.Kind, world);
             }
+
+            for (int i = 0; i < dockQueue.Count; i++)
+            {
+                var queued = dockQueue[i];
+                if (TryGetAvailableDockIndex(queued.Ship, out dockIndex))
+                {
+                    queueIndex = i;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static GameObject[] BreakDockingFormation(GameObject lead)
@@ -417,6 +525,21 @@ namespace LibreLancer.Server.Components
                 formation.Remove(follower);
             formation.Remove(lead);
             return followers;
+        }
+
+        private void StartFormationFollowersDocking(GameObject lead, int requestedIndex, GotoKind kind, GameWorld? world)
+        {
+            if (Action.Kind != DockKinds.Base)
+                return;
+
+            foreach (var ship in BreakDockingFormation(lead))
+                StartDock(ship, requestedIndex, kind, world);
+        }
+
+        private static void DockNpcAtBase(SNPCComponent npc, string? baseName, string? dockObject, GameWorld world)
+        {
+            var remaining = npc.Parent.GetComponent<DirectiveRunnerComponent>()?.GetRemainingDirectivesAfterCurrent();
+            npc.Docked(baseName, dockObject, remaining, world.Server!.System.Nickname);
         }
 
         private void StartDockingRingFlyThrough(DockingAction dock)
@@ -606,11 +729,14 @@ namespace LibreLancer.Server.Components
 
             for (int i = activeDockings.Count - 1; i >= 0; i--)
             {
+                if (i >= activeDockings.Count)
+                    continue;
+
                 var dock = activeDockings[i];
 
                 if (!dock.Ship.Flags.HasFlag(GameObjectFlags.Exists))
                 {
-                    activeDockings.RemoveAt(i);
+                    RemoveActiveDocking(dock, i);
                     continue;
                 }
 
@@ -623,7 +749,7 @@ namespace LibreLancer.Server.Components
                     }
 
                     FLLog.Debug("Docking", $"{dock.Ship} leaving moor {DockPoints[dock.Dock].DockSphere.Hardpoint}");
-                    activeDockings.RemoveAt(i);
+                    RemoveActiveDocking(dock, i);
                     UndockShip(dock.Ship, world, dock.Dock);
                     dock.Ship.GetComponent<AutopilotComponent>()?.Undock(Parent, dock.Dock);
                     continue;
@@ -640,14 +766,14 @@ namespace LibreLancer.Server.Components
                     FLLog.Debug("Docking", $"{dock.Ship} docking ring fly-through complete");
                     if (dock.Ship.TryGetComponent<SPlayerComponent>(out var ringPlayer))
                     {
-                        ringPlayer.Player.ForceLand(Action.Target);
+                        ringPlayer.Player.ForceLand(Action.Target, Parent.Nickname);
                     }
                     else if (dock.Ship.TryGetComponent<SNPCComponent>(out var ringNpc))
                     {
-                        ringNpc.Docked();
+                        DockNpcAtBase(ringNpc, Action.Target, Parent.Nickname, world);
                     }
 
-                    activeDockings.RemoveAt(i);
+                    RemoveActiveDocking(dock, i);
                     continue;
                 }
 
@@ -656,7 +782,7 @@ namespace LibreLancer.Server.Components
                     var tlHardpoint = dock.TLHardpoint;
                     if (tlHardpoint == null)
                     {
-                        activeDockings.RemoveAt(i);
+                        RemoveActiveDocking(dock, i);
                         continue;
                     }
 
@@ -676,7 +802,7 @@ namespace LibreLancer.Server.Components
                     DistanceToDockMount(dock.Dock, dock.Ship) <= GetRingFlyThroughRange(dock.Dock, dock.Ship))
                 {
                     foreach (var ship in BreakDockingFormation(dock.Ship))
-                        QueueDock(ship, dock.Dock, GotoKind.Goto);
+                        QueueDock(ship, GotoKind.Goto);
 
                     StartDockingRingFlyThrough(dock);
                     continue;
@@ -691,7 +817,7 @@ namespace LibreLancer.Server.Components
                 {
                     var dockType = DockPoints[dock.Dock].DockSphere.Type;
                     foreach (var ship in BreakDockingFormation(dock.Ship))
-                        QueueDock(ship, dock.Dock, GotoKind.Goto);
+                        QueueDock(ship, GotoKind.Goto);
 
                     if (IsDockingRingIndex(dock.Dock) &&
                         !dock.RingDocking)
@@ -702,7 +828,7 @@ namespace LibreLancer.Server.Components
 
                     if (dock.Ship.TryGetComponent<SPlayerComponent>(out var player))
                     {
-                        player.Player.ForceLand(Action.Target);
+                        player.Player.ForceLand(Action.Target, Parent.Nickname);
                     }
                     else if (IsMoor(dockType) &&
                              dock.Ship.TryGetComponent<SNPCComponent>(out _))
@@ -724,7 +850,7 @@ namespace LibreLancer.Server.Components
                     }
                     else if (dock.Ship.TryGetComponent<SNPCComponent>(out var npc))
                     {
-                        npc.Docked();
+                        DockNpcAtBase(npc, Action.Target, Parent.Nickname, world);
                     }
                 }
                 else if (Action.Kind == DockKinds.Jump)
@@ -751,7 +877,7 @@ namespace LibreLancer.Server.Components
                     }
                 }
 
-                activeDockings.RemoveAt(i);
+                RemoveActiveDocking(dock, i);
             }
 
             foreach (var dp in DockPoints)

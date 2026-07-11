@@ -739,12 +739,11 @@ namespace LibreLancer
                         return false;
                     }
 
-                    pilotComponent!.StartDock(Selection.Selected, GotoKind.Goto);
-                    var dockCam = dock.GetDockCamera(0);
-                    if (dockCam != null)
+                    if (dock.Action.Kind == DockKinds.Tradelane)
                     {
-                        SetDockCam(dockCam);
+                        pilotComponent!.StartDock(Selection.Selected, GotoKind.Goto);
                     }
+
                     session.RegisterRouteDock(Selection.Selected.NicknameCRC, sys.CRC);
                     session.SpaceRpc.RequestDock(Selection.Selected);
                     return true;

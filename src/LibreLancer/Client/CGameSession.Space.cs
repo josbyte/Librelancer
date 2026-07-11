@@ -894,6 +894,25 @@ public partial class CGameSession
         allowedDocking = docking;
     }
 
+    void IClientPlayer.StartDocking(ObjNetId netId, int index)
+    {
+        RunSync(() =>
+        {
+            var obj = spaceGameplay!.world.GetObject(netId);
+            if (obj == null)
+                return;
+
+            if (obj.TryGetComponent<DockInfoComponent>(out var dock))
+            {
+                var dockCam = dock.GetDockCamera(index);
+                if (dockCam != null)
+                    spaceGameplay.SetDockCam(dockCam);
+            }
+
+            spaceGameplay.pilotComponent!.StartDock(obj, GotoKind.Goto, index);
+        });
+    }
+
     public void WorldReady()
     {
         spaceGameplay!.world.SetCrcTranslation(crcMap);

@@ -14,6 +14,7 @@ using LibreLancer.Data;
 using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Data.GameData.World;
+using LibreLancer.Missions;
 using LibreLancer.Net;
 using LibreLancer.Net.Protocol;
 using LibreLancer.Physics;
@@ -549,6 +550,7 @@ namespace LibreLancer.Server
                     }
                     else
                     {
+                        player.MissionRuntime?.PlayerManeuver(ManeuverType.Dock, string.Empty);
                         component.StartDock(obj, 0, world: GameWorld);
                     }
                 }
@@ -991,15 +993,90 @@ namespace LibreLancer.Server
 
         private double noPlayersTime;
         private double maxNoPlayers = 2.0;
+        private string? missionKeepAliveBase;
 
-        private bool ShouldKeepAliveForMissionSolarBase()
+        public void KeepAliveForMissionBase(string? baseName, MissionRuntime? runtime)
+        {
+            if (!string.IsNullOrWhiteSpace(baseName) && runtime != null)
+                missionKeepAliveBase = baseName;
+        }
+
+        public void AutoDockMissionNpcsAtBase(string? baseName, string? dockObject, MissionRuntime? runtime)
+        {
+            if (string.IsNullOrWhiteSpace(baseName) || runtime == null)
+                return;
+
+            dockObject ??= FindDockObjectForBase(baseName);
+            if (string.IsNullOrWhiteSpace(dockObject))
+            {
+                FLLog.Warning("Mission", $"Could not find a dock object for base `{baseName}`");
+                return;
+            }
+
+            var docked = false;
+            foreach (var obj in spawnedObjects.ToArray())
+            {
+                if (!obj.Flags.HasFlag(GameObjectFlags.Exists) ||
+                    !obj.TryGetComponent<SNPCComponent>(out var npc) ||
+                    npc.MissionRuntime != runtime)
+                {
+                    continue;
+                }
+
+                var runner = obj.GetComponent<DirectiveRunnerComponent>();
+                var remaining = runner?.GetDirectivesForAutoDock();
+                if (runner?.TryGetDockingBase(GameWorld, out _, out var currentDock) == true &&
+                    GameWorld.GetObject(currentDock)?.TryGetComponent<SDockableComponent>(out var currentDockable) == true)
+                {
+                    currentDockable.CancelDocking(obj);
+                }
+
+                if (npc.Docked(baseName, dockObject, remaining, System.Nickname))
+                {
+                    docked = true;
+                    FLLog.Info("Mission", $"Auto-docked mission NPC `{obj.Nickname}` at `{baseName}`");
+                }
+            }
+
+            if (docked)
+                missionKeepAliveBase = baseName;
+        }
+
+        private string? FindDockObjectForBase(string baseName)
+        {
+            foreach (var obj in spawnedObjects)
+            {
+                if (obj.TryGetComponent<SDockableComponent>(out var dockable) &&
+                    string.Equals(dockable.Action.Target, baseName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return obj.Nickname;
+                }
+            }
+
+            return null;
+        }
+
+        private bool ShouldKeepAliveForMissionBase()
         {
             var player = Server.LocalPlayer;
-            return PlayerCount == 0 &&
-                   player?.MissionRuntime != null &&
-                   player.Space == null &&
-                   player.MissionRuntime.IsMissionSolarBase(player.Base) &&
-                   System.Nickname.Equals(player.System, StringComparison.OrdinalIgnoreCase);
+            if (PlayerCount != 0 ||
+                player?.MissionRuntime == null ||
+                player.Space != null ||
+                string.IsNullOrWhiteSpace(player.Base) ||
+                !System.Nickname.Equals(player.System, StringComparison.OrdinalIgnoreCase))
+            {
+                missionKeepAliveBase = null;
+                return false;
+            }
+
+            if (player.MissionRuntime.IsMissionSolarBase(player.Base) ||
+                player.MissionRuntime.HasParkedNpcsForBase(player.Base))
+            {
+                missionKeepAliveBase = player.Base;
+                return true;
+            }
+
+            return string.Equals(missionKeepAliveBase, player.Base, StringComparison.OrdinalIgnoreCase);
         }
 
         private void FreezeShipsForMissionSolarBase()
@@ -1046,7 +1123,7 @@ namespace LibreLancer.Server
                 return true;
             }
 
-            if (ShouldKeepAliveForMissionSolarBase())
+            if (ShouldKeepAliveForMissionBase())
             {
                 FreezeShipsForMissionSolarBase();
                 noPlayersTime = 0;

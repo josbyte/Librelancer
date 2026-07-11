@@ -50,6 +50,11 @@ public abstract class ScriptedCondition : TriggerEntry
     protected static bool IdEqual(string a, string b) =>
         string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
+    protected static bool IdMatches(string expected, string actual) =>
+        string.IsNullOrWhiteSpace(expected) ||
+        IdEqual(expected, "ANY") ||
+        IdEqual(expected, actual);
+
     public static readonly TriggerConditions[] Unsupported =
     [
         TriggerConditions.Cnd_CmpToPlane,
@@ -251,10 +256,9 @@ public class Cnd_TLExited :
 
     protected override bool EventCheck(TLExitedEvent ev, MissionRuntime runtime, ActiveCondition self)
     {
-        if (!IdEqual(Source, ev.Ship) || !IdEqual(StartRing, ev.Ring))
-            return false;
-
-        return true;
+        return IdMatches(Source, ev.Ship) &&
+               IdMatches(StartRing, ev.Ring) &&
+               IdMatches(NextRing, ev.StartRing);
     }
 
     public override void Write(IniBuilder.IniSectionBuilder section)
@@ -292,9 +296,9 @@ public class Cnd_TLEntered :
     }
 
     protected override bool EventCheck(TLEnteredEvent ev, MissionRuntime runtime, ActiveCondition self)
-        => IdEqual(ev.Ship, Source) &&
-           IdEqual(ev.StartRing, StartRing) &&
-           (NextRing == null || IdEqual(ev.NextRing, NextRing));
+        => IdMatches(Source, ev.Ship) &&
+           IdMatches(StartRing, ev.StartRing) &&
+           IdMatches(NextRing ?? string.Empty, ev.NextRing);
 
     public override void Write(IniBuilder.IniSectionBuilder section)
     {
@@ -741,9 +745,7 @@ public class Cnd_NPCSystemEnter : EventListenerCondition<SystemEnteredEvent>
 
     public override bool CheckCondition(MissionRuntime runtime, ActiveCondition self, double elapsed)
     {
-        var checking = (ConditionHashSet)self.Storage;
-        checking.Values.RemoveWhere(runtime.IsObjectDestroyed);
-        return checking.Values.Count == 0;
+        return ((ConditionHashSet)self.Storage).Values.Count == 0;
     }
 
     public override void Write(IniBuilder.IniSectionBuilder section)
@@ -753,9 +755,6 @@ public class Cnd_NPCSystemEnter : EventListenerCondition<SystemEnteredEvent>
 
     private bool HasAlreadyEntered(MissionRuntime runtime, string ship)
     {
-        if (runtime.IsObjectDestroyed(ship))
-            return true;
-
         if (IdEqual(ship, "Player"))
             return IdEqual(runtime.Player.System, System);
 
