@@ -23,7 +23,15 @@ namespace LibreLancer.Render
         public ICamera Camera
         {
             get { return camera; }
-            set { camera = value; }
+            set
+            {
+                if (ReferenceEquals(camera, value))
+                {
+                    return;
+                }
+                camera = value;
+                motionDust?.Reset();
+            }
         }
 
         private ICamera camera;
@@ -66,6 +74,12 @@ namespace LibreLancer.Render
         public IRendererSettings Settings;
         private Billboards billboards;
         private ResourceManager resman;
+        private MotionDustRenderer? motionDust;
+        private ResolvedFx? systemDustEffect;
+        private int systemDustMaxParticles;
+        private Zone[] dustZones = [];
+        private ResolvedFx? activeDustEffect;
+        private int activeDustMaxParticles = -1;
 
         public Game Game
         {
@@ -166,6 +180,91 @@ namespace LibreLancer.Render
             LoadLights(system);
             LoadStarspheres(system);
             LoadZones(system.AsteroidFields, system.Nebulae);
+            LoadDust(system);
+        }
+
+        private void LoadDust(StarSystem system)
+        {
+            motionDust = null;
+            activeDustEffect = null;
+            activeDustMaxParticles = -1;
+            systemDustEffect = system.SpacedustEffect;
+            systemDustMaxParticles = system.SpacedustMaxParticles;
+
+            var zones = new List<Zone>();
+            foreach (var zone in system.Zones)
+            {
+                if (zone.SpacedustEffect != null)
+                {
+                    zones.Add(zone);
+                }
+            }
+            zones.Sort((a, b) => DustZoneVolume(a).CompareTo(DustZoneVolume(b)));
+            dustZones = zones.ToArray();
+        }
+
+        private void UpdateDust()
+        {
+            Zone? selectedZone = null;
+            foreach (var zone in dustZones)
+            {
+                if (zone.ContainsPoint(camera.Position))
+                {
+                    selectedZone = zone;
+                    break;
+                }
+            }
+
+            var dust = selectedZone != null
+                ? selectedZone.SpacedustEffect
+                : systemDustEffect;
+            var configuredMaxParticles = selectedZone != null
+                ? selectedZone.SpacedustMaxParticles
+                : systemDustMaxParticles;
+            var maxParticles = dust != null
+                ? configuredMaxParticles > 0 ? configuredMaxParticles : 200
+                : 0;
+            if (ReferenceEquals(dust, activeDustEffect) && maxParticles == activeDustMaxParticles)
+            {
+                return;
+            }
+
+            activeDustEffect = dust;
+            activeDustMaxParticles = maxParticles;
+            motionDust = null;
+            if (dust == null)
+            {
+                return;
+            }
+
+            var fx = dust.GetEffect(resman);
+            if (fx == null)
+            {
+                FLLog.Warning("Dust", $"Unable to load spacedust effect '{dust.Nickname}' ({dust.AlePath ?? "no ALE path"})");
+                return;
+            }
+
+            motionDust = new MotionDustRenderer(fx, maxParticles);
+            var source = selectedZone != null
+                ? $"zone '{selectedZone.Nickname}'"
+                : "system";
+            FLLog.Info("Dust", $"Loaded {source} spacedust effect '{dust.Nickname}' with {motionDust.ParticleCount} particles");
+        }
+
+        private static double DustZoneVolume(Zone zone)
+        {
+            var x = Math.Abs((double)zone.Size.X);
+            var y = Math.Abs((double)zone.Size.Y);
+            var z = Math.Abs((double)zone.Size.Z);
+            return zone.Shape switch
+            {
+                ShapeKind.Sphere => (4.0 / 3.0) * Math.PI * x * x * x,
+                ShapeKind.Box => x * y * z,
+                ShapeKind.Ellipsoid => (4.0 / 3.0) * Math.PI * x * y * z,
+                ShapeKind.Cylinder => Math.PI * x * x * y,
+                ShapeKind.Ring => Math.PI * Math.Max(0, (x * x) - (z * z)) * y,
+                _ => double.MaxValue
+            };
         }
 
         public void Update(double elapsed)
@@ -352,8 +451,10 @@ namespace LibreLancer.Render
 
             DebugRenderer.StartFrame(rstate);
             Commands.StartFrame(rstate);
+            UpdateDust();
             FxPool.StartFrame(camera);
             Polyline.StartFrame();
+            motionDust?.Draw(camera, FxPool, resman, game.TotalTime);
             rstate.DepthEnabled = true;
             // Optimisation for dictionary lookups
             LightEquipRenderer.FrameStart();

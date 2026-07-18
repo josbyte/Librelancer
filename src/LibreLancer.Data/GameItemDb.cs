@@ -1327,6 +1327,7 @@ public class GameItemDb
             sys.MusicBattle = inisys.Music?.Battle;
             sys.MusicDanger = inisys.Music?.Danger;
             sys.Spacedust = inisys.Dust?.Spacedust;
+            sys.SpacedustEffect = Effects.Get(sys.Spacedust) ?? VisEffects.Get(sys.Spacedust);
             sys.SpacedustMaxParticles = inisys.Dust?.SpacedustMaxParticles ?? 0;
             sys.FarClip = inisys.Info?.SpaceFarClip ?? 20000f;
             sys.NavMapScale = inisys.NavMapScale;
@@ -1528,6 +1529,7 @@ public class GameItemDb
                         //
                         Music = zne.Music,
                         Spacedust = zne.Spacedust,
+                        SpacedustEffect = Effects.Get(zne.Spacedust) ?? VisEffects.Get(zne.Spacedust),
                         SpacedustMaxParticles = zne.SpacedustMaxParticles,
                         Interference = zne.Interference,
                         PowerModifier = zne.PowerModifier,

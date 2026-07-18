@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using LibreLancer.Data.GameData;
 using LibreLancer.Data.Schema.Universe;
 
 namespace LibreLancer.Data.GameData.World;
@@ -588,6 +589,7 @@ public class Zone : NicknameItem
     public string[]? PopType;
     public string? Music;
     public string? Spacedust;
+    public ResolvedFx? SpacedustEffect;
     public ref int SpacedustMaxParticles => ref data.SpacedustMaxParticles;
     public ref float Interference => ref data.Interference;
     public ref float PowerModifier => ref data.PowerModifier;
@@ -643,6 +645,7 @@ public class Zone : NicknameItem
         other.PopType = PopType.ShallowCopy()!;
         other.Music = Music;
         other.Spacedust = Spacedust;
+        other.SpacedustEffect = SpacedustEffect;
         other.Comment = Comment;
         other.AttackIds = AttackIds.ShallowCopy()!;
         other.MissionType = MissionType.ShallowCopy()!;

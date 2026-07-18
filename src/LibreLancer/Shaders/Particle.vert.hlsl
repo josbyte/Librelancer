@@ -22,6 +22,7 @@ cbuffer ParticleParameters : register(b3, UNIFORM_SPACE)
     // 0 = basic
     // 1 = rect
     // 2 = perp
+    // 3 = camera-local screen dust
     int Type;
 };
 
@@ -56,6 +57,36 @@ Output main(int vertexID: SV_VertexID)
     float3 p = particle.position;
     float4 color = DiffuseToFloat4(particle.color);
 
+    float s, c;
+    sincos(particle.rotate, s, c);
+
+    float2 uvs[4] = {
+        particle.texCoords.xw,
+        particle.texCoords.zw,
+        particle.texCoords.xy,
+        particle.texCoords.zy
+    };
+
+    Output output;
+
+    if (Type == 3)
+    {
+        // Camera-local motion dust. Position and size are already in clip-space XY.
+        float2 shortAxis = float2(c, -s) * particle.halfSize.x;
+        float2 longAxis = float2(s, c) * particle.halfSize.y;
+        float2 screenPositions[4] = {
+            p.xy - longAxis - shortAxis,
+            p.xy + longAxis - shortAxis,
+            p.xy - longAxis + shortAxis,
+            p.xy + longAxis + shortAxis
+        };
+
+        output.position = float4(screenPositions[vertex], p.z, 1.0);
+        output.texCoord = uvs[vertex];
+        output.color = color;
+        return output;
+    }
+
     float3 right;
     float3 up;
 
@@ -87,9 +118,6 @@ Output main(int vertexID: SV_VertexID)
         up = cross(right, particle.normal);
     }
 
-    float s, c;
-    sincos(particle.rotate, s, c);
-
     float3 vUp = (c * right - s * up) * particle.halfSize.x;
     float3 vRight = (s * right + c * up) * particle.halfSize.y;
 
@@ -100,14 +128,6 @@ Output main(int vertexID: SV_VertexID)
         p + vRight + vUp
     };
 
-    float2 uvs[4] = {
-        particle.texCoords.xw,
-        particle.texCoords.zw,
-        particle.texCoords.xy,
-        particle.texCoords.zy
-    };
-
-    Output output;
     output.position = mul(float4(positions[vertex], 1.0), ViewProjection);
     output.texCoord = uvs[vertex];
     output.color = color;

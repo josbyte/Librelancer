@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using LibreLancer.Data.GameData;
 
 namespace LibreLancer.Data.GameData.World;
 
@@ -72,6 +73,8 @@ public class StarSystem : NamedItem
     //Dust
     public string? Spacedust;
 
+    public ResolvedFx? SpacedustEffect;
+
     public int SpacedustMaxParticles;
 
     //Preloads
@@ -119,6 +122,7 @@ public class StarSystem : NamedItem
         other.FarClip = FarClip;
         other.NavMapScale = NavMapScale;
         other.Spacedust = Spacedust;
+        other.SpacedustEffect = SpacedustEffect;
         other.SpacedustMaxParticles = SpacedustMaxParticles;
 
         foreach (var z in Zones)

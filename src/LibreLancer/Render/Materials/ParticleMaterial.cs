@@ -9,7 +9,8 @@ public enum ParticleDrawKind
 {
     Basic,
     Rect,
-    Perp
+    Perp,
+    Screen
 }
 
 public class ParticleMaterial(StorageBuffer buffer) : RenderMaterial(null)
