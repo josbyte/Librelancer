@@ -309,6 +309,14 @@ public partial class Navmap
             selectorMenu.OnMouseClick(context);
         if (selectorMenu.MouseWanted(context, context.MouseX, context.MouseY))
             return;
+        if (viewState.Active(SectorViewState.System) && OverlayMode == NavmapOverlayMode.Bases)
+        {
+            if (TryClickKnownBase(context, mapRect))
+                context.PlaySound(SelectSound);
+            return;
+        }
+        if (viewState.Active(SectorViewState.System) && OverlayMode == NavmapOverlayMode.Legend)
+            return;
         if (viewState.Active(SectorViewState.Sector))
         {
             var clickedStar = SectorStarAt(mapRect, new Vector2(context.MouseX, context.MouseY));
@@ -335,6 +343,38 @@ public partial class Navmap
         context.PlaySound(SelectSound);
     }
 
+    private bool TryClickKnownBase(UiContext context, RectangleF mapRect)
+    {
+        if (!mapRect.Contains(context.MouseX, context.MouseY) || knownBases.Length == 0)
+            return false;
+        var index = KnownBaseIndexAt(mapRect, context.MouseY);
+        if (index < 0 || index >= knownBases.Length)
+            return false;
+        var item = knownBases[index];
+        FocusSystemObject(item.SystemHash, item.ObjectHash);
+        OverlayMode = NavmapOverlayMode.Physical;
+        return true;
+    }
+
+    public override void OnMouseWheel(UiContext context, float delta)
+    {
+        if (OverlayMode != NavmapOverlayMode.Bases || !viewState.Active(SectorViewState.System))
+        {
+            base.OnMouseWheel(context, delta);
+            return;
+        }
+        var mapRect = GetMapRectangle(context);
+        if (!mapRect.Contains(context.MouseX, context.MouseY))
+            return;
+        var maxRows = KnownBaseVisibleRows(mapRect);
+        var maxScroll = Math.Max(0, knownBases.Length - maxRows);
+        if (delta < 0)
+            knownBaseScroll++;
+        else if (delta > 0)
+            knownBaseScroll--;
+        knownBaseScroll = Math.Clamp(knownBaseScroll, 0, maxScroll);
+    }
+
     public override void OnMouseUp(UiContext context)
     {
         if (!AcceptInput)
@@ -353,5 +393,17 @@ public partial class Navmap
         var lH = context.RenderContext.Renderer2D.LineHeight(gridIdentFont, context.TextSize(gridIdentSize)) *
             inputRatio + 3;
         return GetMapRectangle(parentRect, lH);
+    }
+
+    private static int KnownBaseVisibleRows(RectangleF mapRect) =>
+        Math.Max(1, (int)((mapRect.Height - 38) / NavmapListRowHeight));
+
+    private int KnownBaseIndexAt(RectangleF mapRect, float mouseY)
+    {
+        var listTop = mapRect.Y + 32;
+        var row = (int)((mouseY - listTop) / NavmapListRowHeight);
+        if (row < 0 || row >= KnownBaseVisibleRows(mapRect))
+            return -1;
+        return knownBaseScroll + row;
     }
 }

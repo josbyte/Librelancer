@@ -8,6 +8,7 @@ using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using LibreLancer.Data;
+using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.World;
 using LibreLancer.Data.Schema.Solar;
 using LibreLancer.Graphics;
@@ -19,6 +20,15 @@ using WattleScript.Interpreter;
 namespace LibreLancer.Interface;
 
 public readonly record struct NavmapWaypoint(Vector3 Position, int Number);
+
+[WattleScriptUserData]
+public class NavmapBaseListItem
+{
+    public string Name = "";
+    public string SystemName = "";
+    public uint SystemHash;
+    public uint ObjectHash;
+}
 
 [UiLoadable]
 [WattleScriptUserData]
@@ -45,6 +55,8 @@ public partial class Navmap : UiWidget
     private const float SectorStarLargeSize = 8.0f;
     private const float SectorStarExtraShrinkMaximum = 0.08f;
     private const float SectorConnectionThickness = 4f;
+    private const float NavmapListRowHeight = 22f;
+    private const float NavmapListPadding = 8f;
     private const string SelectSound = "ui_item_select";
     private const string SelectAddSound = "ui_select_add";
 
@@ -74,6 +86,9 @@ public partial class Navmap : UiWidget
     private bool draggingMap;
 
     private Func<uint, bool> isVisited = _ => true;
+    private Func<string?, float> factionRelation = _ => 0;
+    private NavmapBaseListItem[] knownBases = [];
+    private int knownBaseScroll;
     private Vector2 lastMousePosition;
 
     private readonly CachedRenderString[] letterCache = new CachedRenderString[16];
@@ -108,16 +123,24 @@ public partial class Navmap : UiWidget
     private float startZoom = 1f;
     private string systemName = "";
     private CachedRenderString? systemNameCache;
+    private CachedRenderString? overlayTitleCache;
+    private CachedRenderString? overlayTextCache;
+    private CachedRenderString[] baseNameCaches = [];
+    private CachedRenderString[] baseSystemCaches = [];
     private Vector2 targetOffset;
     private float targetZoom = 1f;
 
     private List<Tradelanes> tradelanes = [];
+    private List<DrawZone> politicalZones = [];
+    private List<DrawZone> miningZones = [];
+    private List<PatrolPath> patrolPaths = [];
     private UiRenderable? userWaypointDiamond;
     private Action<StarSystem, List<NavmapWaypoint>>? userWaypointProvider;
 
     private readonly ViewStateMachine<SectorViewState> viewState = new(SectorViewState.System);
 
     private List<DrawZone> zones = [];
+    private Vector3? pendingFocusPosition;
 
     public float Zoom = 1f;
     private float zoomAnimationTime = ZoomAnimationDuration;
@@ -139,6 +162,17 @@ public partial class Navmap : UiWidget
 
     public bool AcceptInput { get; set; } = true;
     public bool SectorViewActive => viewState.Active(SectorViewState.Sector);
+    public bool ShowLabels { get; set; } = true;
+    public NavmapOverlayMode OverlayMode { get; private set; } = NavmapOverlayMode.Physical;
+    public string OverlayModeName => OverlayMode switch
+    {
+        NavmapOverlayMode.Political => "political",
+        NavmapOverlayMode.Patrol => "patrol",
+        NavmapOverlayMode.Mining => "mining",
+        NavmapOverlayMode.Legend => "legend",
+        NavmapOverlayMode.Bases => "bases",
+        _ => "physical"
+    };
 
     public bool LetterMargin { get; set; } = false;
 
@@ -153,6 +187,33 @@ public partial class Navmap : UiWidget
     public void SetVisitFunction(Func<uint, bool> isVisited)
     {
         this.isVisited = isVisited;
+    }
+
+    public void SetLabelsVisible(bool visible)
+    {
+        ShowLabels = visible;
+    }
+
+    public void SetOverlayMode(string mode)
+    {
+        OverlayMode = mode?.ToLowerInvariant() switch
+        {
+            "political" => NavmapOverlayMode.Political,
+            "patrol" or "patrols" => NavmapOverlayMode.Patrol,
+            "mining" or "miningfilter" => NavmapOverlayMode.Mining,
+            "legend" or "legendtoggle" => NavmapOverlayMode.Legend,
+            "bases" or "knownbases" => NavmapOverlayMode.Bases,
+            _ => NavmapOverlayMode.Physical
+        };
+        selectorMapPosition = null;
+    }
+
+    public void SetKnownBases(NavmapBaseListItem[] bases)
+    {
+        knownBases = bases ?? [];
+        knownBaseScroll = 0;
+        baseNameCaches = new CachedRenderString[knownBases.Length];
+        baseSystemCaches = new CachedRenderString[knownBases.Length];
     }
 
     [WattleScriptHidden]
@@ -204,6 +265,24 @@ public partial class Navmap : UiWidget
         sectorConnections.AddRange(visibleConnections.Values);
     }
 
+    public void FocusSystemObject(uint systemHash, uint objectHash)
+    {
+        if (!universeSystems.TryGetValue(systemHash, out var system))
+            return;
+        var obj = system.Objects.FirstOrDefault(x => FLHash.CreateID(x.Nickname) == objectHash);
+        if (obj == null)
+            return;
+        pendingFocusPosition = obj.Position;
+        if (viewState.Active(SectorViewState.System) && currentDisplaySystem == system)
+        {
+            pendingSectorSystem = null;
+        }
+        else
+        {
+            EnterSystemView(system);
+        }
+    }
+
     [WattleScriptHidden]
     public void SetAddWaypointFunction(Action<StarSystem, Vector3>? addWaypoint)
     {
@@ -234,6 +313,12 @@ public partial class Navmap : UiWidget
         this.userWaypointProvider = userWaypointProvider;
         if (userWaypointProvider == null)
             userWaypoints.Clear();
+    }
+
+    [WattleScriptHidden]
+    public void SetFactionRelationFunction(Func<string?, float> factionRelation)
+    {
+        this.factionRelation = factionRelation;
     }
 
     private class DrawObject
@@ -291,6 +376,12 @@ public partial class Navmap : UiWidget
         }
     }
 
+    private class PatrolPath
+    {
+        public readonly List<Vector2> Points = [];
+        public Color4 Color;
+    }
+
     private struct Tradelanes
     {
         public Vector2 StartXZ;
@@ -301,6 +392,16 @@ public partial class Navmap : UiWidget
     {
         System,
         Sector
+    }
+
+    public enum NavmapOverlayMode
+    {
+        Physical,
+        Political,
+        Patrol,
+        Mining,
+        Legend,
+        Bases
     }
 
     private struct ZoneVertex : IVertexType
