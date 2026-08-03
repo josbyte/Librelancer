@@ -312,12 +312,17 @@ namespace LibreLancer.World
 
         public void AddComponent<T>(T component) where T : GameComponent
         {
-            componentLookup.TryAdd(typeof(T), component);
             components.Add(component);
 
-            if (typeof(T).BaseType != typeof(GameComponent))
+            // Components can have useful intermediate base classes (for
+            // example a specialised launcher deriving from WeaponComponent).
+            // Register every component type up to, but not including,
+            // GameComponent so base-type queries can discover them.
+            var componentType = component.GetType();
+            while (componentType != null && componentType != typeof(GameComponent))
             {
-                componentLookup.TryAdd(typeof(T).BaseType!, component);
+                componentLookup.TryAdd(componentType, component);
+                componentType = componentType.BaseType;
             }
         }
 
@@ -343,11 +348,16 @@ namespace LibreLancer.World
         public void RemoveComponent<T>(T component) where T : GameComponent
         {
             components.Remove(component);
-            componentLookup.Remove(typeof(T));
 
-            if (typeof(T).BaseType != typeof(GameComponent))
+            var componentType = component.GetType();
+            while (componentType != null && componentType != typeof(GameComponent))
             {
-                componentLookup.Remove(typeof(T).BaseType!);
+                if (componentLookup.TryGetValue(componentType, out var registered) &&
+                    ReferenceEquals(registered, component))
+                {
+                    componentLookup.Remove(componentType);
+                }
+                componentType = componentType.BaseType;
             }
         }
 

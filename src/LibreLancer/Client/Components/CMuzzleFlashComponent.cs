@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Physics;
 using LibreLancer.Render;
@@ -11,12 +12,17 @@ namespace LibreLancer.Client.Components;
 
 public class CMuzzleFlashComponent : GameComponent
 {
-    public GunEquipment Object;
+    public ResolvedFx? FlashEffect;
     public List<ParticleEffectRenderer> Renderers = [];
 
     public CMuzzleFlashComponent(GameObject parent, GunEquipment gun) : base(parent)
     {
-        Object = gun;
+        FlashEffect = gun.FlashEffect;
+    }
+
+    public CMuzzleFlashComponent(GameObject parent, CountermeasureEquipment countermeasure) : base(parent)
+    {
+        FlashEffect = countermeasure.FlashEffect;
     }
 
     public void OnFired()
@@ -31,12 +37,12 @@ public class CMuzzleFlashComponent : GameComponent
     public override void Register(GameWorld world)
     {
         var resManager = GetResourceManager(world);
-        if (Object.FlashEffect == null || resManager == null)
+        if (FlashEffect == null || resManager == null)
         {
             return;
         }
 
-        var pfx = Object.FlashEffect.GetEffect(resManager);
+        var pfx = FlashEffect.GetEffect(resManager);
         if (pfx == null)
         {
             return;
@@ -51,6 +57,7 @@ public class CMuzzleFlashComponent : GameComponent
                 Attachment = fire
             };
             Parent.ExtraRenderers.Add(pr);
+            Renderers.Add(pr);
         }
 
     }
