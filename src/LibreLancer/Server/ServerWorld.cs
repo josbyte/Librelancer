@@ -546,7 +546,7 @@ namespace LibreLancer.Server
                 return;
             }
 
-            // Freelancer uses this as a one-in-N drop difficulty. Zero means every asteroid drops loot.
+            // MAYBE BE UNUSED, TEST: Zero means every asteroid drops loot.
             if (loot.LootDifficulty > 1 && debrisRandom.NextSingle() >= 1f / loot.LootDifficulty)
             {
                 return;
@@ -827,7 +827,7 @@ namespace LibreLancer.Server
             if (arch.Hitpoints > 0)
             {
                 gameobj.AddComponent(new SHealthComponent(gameobj)
-                    { CurrentHealth = arch.Hitpoints, MaxHealth = arch.Hitpoints });
+                { CurrentHealth = arch.Hitpoints, MaxHealth = arch.Hitpoints });
                 gameobj.AddComponent(new SDestroyableComponent(gameobj, this));
             }
 
@@ -875,7 +875,7 @@ namespace LibreLancer.Server
                     go.PhysicsComponent.Body.Impulse(initialImpulse.Value);
                 spawnedObjects.Add(go);
                 go.AddComponent(new SHealthComponent(go)
-                    { MaxHealth = crate.Hitpoints, CurrentHealth = crate.Hitpoints });
+                { MaxHealth = crate.Hitpoints, CurrentHealth = crate.Hitpoints });
                 go.AddComponent(new SDestroyableComponent(go, this));
                 var lt = new LootComponent(go);
                 lt.Cargo.Add(new BasicCargo(good, count));
@@ -955,7 +955,7 @@ namespace LibreLancer.Server
                 }
 
                 var collider = src.Collision;
-                var mdl = ((IRigidModelFile) src.Drawable).CreateRigidModel(false, Server.Resources);
+                var mdl = ((IRigidModelFile)src.Drawable).CreateRigidModel(false, Server.Resources);
                 var newmodel = mdl.Parts[part].CloneAsRoot(mdl);
                 var id = IdGenerator.Allocate();
                 var go = new GameObject(newmodel, collider, part, mass, false)
@@ -1247,12 +1247,12 @@ namespace LibreLancer.Server
 
                 if (obj.TryGetComponent<SHealthComponent>(out var health))
                 {
-                    update.Hull = (int) health.CurrentHealth;
+                    update.Hull = (int)health.CurrentHealth;
                     var sh = obj.GetFirstChildComponent<SShieldComponent>();
 
                     if (sh != null)
                     {
-                        update.Shield = (int) sh.Health;
+                        update.Shield = (int)sh.Health;
                     }
                     if (health.EquipmentHealths.Count > 0)
                     {
