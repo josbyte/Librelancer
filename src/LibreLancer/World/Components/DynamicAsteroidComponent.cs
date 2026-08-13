@@ -12,6 +12,7 @@ public class DynamicAsteroidComponent(GameObject parent, float maxVelocity, floa
     public ulong SpawnGroup = spawnGroup;
     public AsteroidFieldComponent? ParentField = parentField;
     public GameObject? RefObject = refObject;
+    public bool RemovalQueued;
 
     public override void Update(double time, GameWorld world)
     {

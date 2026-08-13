@@ -511,14 +511,63 @@ namespace LibreLancer.Server
         {
             if (obj.Kind == GameObjectKind.DynamicAsteroid)
             {
+                var asteroid = obj.GetComponent<DynamicAsteroidComponent>();
+                if (asteroid?.RemovalQueued == true)
+                {
+                    return;
+                }
+                if (asteroid != null)
+                {
+                    asteroid.RemovalQueued = true;
+                    SpawnDynamicAsteroidLoot(asteroid, obj.WorldTransform.Position,
+                        obj.PhysicsComponent?.Body.LinearVelocity ?? Vector3.Zero);
+                }
                 RemoveSpawnedObject(obj, true);
-                // Loot spawn required
             }
             else if (obj.TryGetComponent<SHealthComponent>(out var health))
             {
                 health.Damage(munition.Def.HullDamage, munition.Def.EnergyDamage, owner, child);
                 health.OnProjectileHit(owner);
             }
+        }
+
+        private void SpawnDynamicAsteroidLoot(DynamicAsteroidComponent asteroid, Vector3 position,
+            Vector3 asteroidVelocity)
+        {
+            var loot = asteroid.ParentField?.GetDynamicLootZone(position);
+            if (loot?.LootCommodity == null)
+            {
+                return;
+            }
+
+            var crate = loot.LootContainer ?? loot.LootCommodity.LootAppearance;
+            if (crate == null)
+            {
+                return;
+            }
+
+            // Freelancer uses this as a one-in-N drop difficulty. Zero means every asteroid drops loot.
+            if (loot.LootDifficulty > 1 && debrisRandom.NextSingle() >= 1f / loot.LootDifficulty)
+            {
+                return;
+            }
+
+            var minCount = Math.Max(0, (int)MathF.Ceiling(MathF.Min(loot.LootCount.X, loot.LootCount.Y)));
+            var maxCount = Math.Max(minCount, (int)MathF.Floor(MathF.Max(loot.LootCount.X, loot.LootCount.Y)));
+            if (maxCount <= 0)
+            {
+                return;
+            }
+
+            var count = maxCount == minCount
+                ? minCount
+                : debrisRandom.Next(minCount, maxCount + 1);
+            var impulse = asteroidVelocity.LengthSquared() > 0.0001f
+                ? Vector3.Normalize(asteroidVelocity) * 2f
+                : Vector3.Zero;
+
+            SpawnLoot(crate, loot.LootCommodity, count,
+                new Transform3D(position, Quaternion.Identity), initialImpulse: impulse);
         }
 
         public void RequestDock(Player player, ObjNetId id)

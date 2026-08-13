@@ -57,6 +57,12 @@ namespace LibreLancer.World.Components
             return Field.ExclusionZones.FirstOrDefault(f => f.Zone?.ContainsPoint(pt) ?? false);
         }
 
+        public DynamicLootZone? GetDynamicLootZone(Vector3 position)
+        {
+            return Field.LootZones.FirstOrDefault(x => x.Zone?.ContainsPoint(position) == true) ??
+                   Field.FieldLoot;
+        }
+
         private PhysicsWorld? phys;
 
         public override void Register(GameWorld world)

@@ -1859,6 +1859,10 @@ public class GameItemDb
                 {
                     FLLog.Error("System", "Loot zone " + lz.Zone + " zone does not exist in " + sys.Nickname);
                 }
+                else
+                {
+                    field.LootZones.Add(z);
+                }
             }
         }
 
