@@ -33,7 +33,7 @@ namespace LibreLancer.Thn.Events
                 t += delta;
                 if (t > Duration)
                 {
-                    Child.Attachments.Remove(Attachment);
+                    Attachment.RemoveAfterUpdate = true;
                     return false;
                 }
                 return true;

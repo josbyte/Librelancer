@@ -73,7 +73,8 @@ namespace LibreLancer.Thn.Events
                 Parent.T = pct;
                 if (time >= Event.Duration)
                 {
-                    Child.Attachments.Remove(Attachment);
+                    Parent.T = Event.StopPercent;
+                    Attachment.RemoveAfterUpdate = true;
                     return false;
                 }
                 return true;

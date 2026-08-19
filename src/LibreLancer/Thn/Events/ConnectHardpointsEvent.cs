@@ -80,7 +80,8 @@ namespace LibreLancer.Thn.Events
                 return;
             }
 
-            if (string.IsNullOrEmpty(Hardpoint) || (parentHp = GetHardpoint(parent.Object!, ParentHardpoint!)) == null)
+            if (string.IsNullOrEmpty(ParentHardpoint) ||
+                (parentHp = GetHardpoint(parent.Object!, ParentHardpoint)) == null)
             {
                 FLLog.Error("Thn", $"Could not find hardpoint on {Targets[0]}");
                 return;

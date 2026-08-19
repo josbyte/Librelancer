@@ -248,7 +248,7 @@ namespace LibreLancer.Render
 
                     var cht = ft;
 
-                    if (Duration > 0 && Loop)
+                    if (Loop && o.Channel.Duration > 0)
                     {
                         var trOne = Vector3.Zero;
                         Quaternion qOne = Quaternion.Identity;
@@ -304,7 +304,7 @@ namespace LibreLancer.Render
                     ref var j = ref Joints[i];
                     ref var ch = ref Script.JointMaps[j.JointMapIndex].Channel;
                     var cht = ft;
-                    if (Loop && ft > ch.Duration)
+                    if (Loop && ch.Duration > 0 && ft > ch.Duration)
                     {
                         cht = ft % ch.Duration;
                     }

@@ -340,7 +340,10 @@ namespace LibreLancer.World.Components
             }
             else
             {
-                t = t % jm.Channel.Duration;
+                if (jm.Channel.Duration > 0)
+                {
+                    t = t % jm.Channel.Duration;
+                }
             }
 
             if (reverse)

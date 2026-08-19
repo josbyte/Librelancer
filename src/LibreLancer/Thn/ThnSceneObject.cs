@@ -100,6 +100,8 @@ public class ThnSceneObject
         Translate = self.Position;
         Rotate = self.Orientation;
         UpdateEngineObjects();
+
+        Attachments.RemoveAll(x => x.RemoveAfterUpdate);
     }
 
 
@@ -148,6 +150,7 @@ public class ThnAttachment(ThnAttachParent parent)
     public bool EntityRelative;
     public bool LookAt;
     public bool PathLookAt;
+    public bool RemoveAfterUpdate;
 
     public ThnAttachParent Parent = parent;
 }

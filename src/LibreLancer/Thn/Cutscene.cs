@@ -181,6 +181,7 @@ public class Cutscene : IDisposable
     {
         hasScene = false;
         currentTime = 0;
+        lagCounter = 0;
         if (resetObjects)
         {
             sceneObjects = new Dictionary<string, ThnSceneObject>(StringComparer.OrdinalIgnoreCase);
@@ -313,16 +314,7 @@ public class Cutscene : IDisposable
 
     public void _Update(double delta)
     {
-        if (Running)
-        {
-            var pos = camera.Object!.Translate;
-            var forward = Vector3.Transform(-Vector3.UnitZ, camera.Object.Rotate);
-            var up = Vector3.Transform(Vector3.UnitY, camera.Object.Rotate);
-            soundManager?.UpdateListener(delta, pos, forward, up);
-        }
-
         currentTime += delta;
-        foreach (var obj in sceneObjects.Values) obj.Update();
         if (text != null)
         {
             if (currentTime > text.Start)
@@ -337,10 +329,20 @@ public class Cutscene : IDisposable
             instance.Update(delta);
         }
 
-        camera.Update();
         if (Renderer != null)
         {
             World.Update(delta);
+        }
+
+        foreach (var obj in sceneObjects.Values) obj.Update();
+
+        camera.Update();
+        if (Running && camera.Object != null)
+        {
+            var pos = camera.Object.Translate;
+            var forward = Vector3.Transform(-Vector3.UnitZ, camera.Object.Rotate);
+            var up = Vector3.Transform(Vector3.UnitY, camera.Object.Rotate);
+            soundManager?.UpdateListener(delta, pos, forward, up);
         }
     }
 

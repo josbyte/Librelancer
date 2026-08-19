@@ -18,6 +18,24 @@ namespace LibreLancer.Thn
 {
     public abstract class ThnEventProcessor
     {
+        private double? initialDelta;
+
+        internal void SetInitialDelta(double delta)
+        {
+            initialDelta = delta;
+        }
+
+        internal double ConsumeDelta(double frameDelta)
+        {
+            if (initialDelta is not { } delta)
+            {
+                return frameDelta;
+            }
+
+            initialDelta = null;
+            return delta;
+        }
+
         public abstract bool Run(double delta);
     }
 
@@ -25,6 +43,7 @@ namespace LibreLancer.Thn
     {
         private Queue<ThnEvent> events = new();
         private List<ThnEventProcessor> processors = [];
+        private double? currentEventTime;
 
         public double CurrentTime = 0;
         public double Duration;
@@ -52,6 +71,11 @@ namespace LibreLancer.Thn
 
         public void AddProcessor(ThnEventProcessor ev)
         {
+            if (currentEventTime is { } eventTime)
+            {
+                ev.SetInitialDelta(Math.Max(0, CurrentTime - eventTime));
+            }
+
             processors.Add(ev);
         }
 
@@ -332,13 +356,23 @@ namespace LibreLancer.Thn
                 }
                 else
                 {
-                    ev.Run(this);
+                    var previousEventTime = currentEventTime;
+                    currentEventTime = ev.Time;
+                    try
+                    {
+                        ev.Run(this);
+                    }
+                    finally
+                    {
+                        currentEventTime = previousEventTime;
+                    }
                 }
             }
 
             for (int i = 0; i < processors.Count; i++)
             {
-                if (!processors[i].Run(delta))
+                var processor = processors[i];
+                if (!processor.Run(processor.ConsumeDelta(delta)))
                 {
                     processors.RemoveAt(i);
                     i--;
