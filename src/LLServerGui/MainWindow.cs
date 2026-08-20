@@ -241,25 +241,7 @@ public class MainWindow() : Game(600, 600, true)
             }
             if (Theme.IconMenuItem(Icons.File, "Load", true))
             {
-                FileDialog.Open(path => {
-                    try
-                    {
-                        if (string.IsNullOrEmpty(path))
-                        {
-                            return;
-                        }
-                        ServerGuiConfig.LastConfigPath = path;
-                        SaveServerGuiConfig();
-
-                        var newConfig = GetServerConfigFromFileOrDefault(path);
-                        serverConfig.CopyFrom(newConfig);
-                    }
-                    catch (Exception ex)
-                    {
-                        pm.MessageBox("Error - Load failed", $"Configuration file failed to load:\r\t {ex.Message}", false, MessageBoxButtons.Ok);
-                    }
-
-                }, saveAsFilter);
+                FileDialog.Open(path => LoadServerConfig(path, serverConfig), saveAsFilter);
             }
 
             ImGui.Spacing();
@@ -342,6 +324,25 @@ public class MainWindow() : Game(600, 600, true)
         File.WriteAllText(serverGuiConfigPath, JSON.Serialize(ServerGuiConfig));
     }
 
+    public void LoadServerConfig(string? path, ServerConfig destination)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return;
+        }
+
+        try
+        {
+            ServerGuiConfig.LastConfigPath = path;
+            SaveServerGuiConfig();
+            destination.CopyFrom(GetServerConfigFromFileOrDefault(path));
+        }
+        catch (Exception ex)
+        {
+            pm.MessageBox("Error - Load failed", $"Configuration file failed to load:\r\t {ex.Message}", false, MessageBoxButtons.Ok);
+        }
+    }
+
     private void DrawStatusBar()
     {
         var io = ImGui.GetIO();
@@ -417,7 +418,7 @@ public class MainWindow() : Game(600, 600, true)
     {
         ServerConfig? config;
 
-        if (File.Exists(ServerGuiConfig.LastConfigPath))
+        if (File.Exists(path))
         {
             config = JSON.Deserialize<ServerConfig>(File.ReadAllText(path));
             if (config != null)

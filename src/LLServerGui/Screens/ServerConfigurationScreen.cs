@@ -160,17 +160,7 @@ public class ServerConfigurationScreen(
             {
                 FileDialog.Open(filepath =>
                 {
-                    if (string.IsNullOrEmpty(filepath))
-                    {
-                        return;
-                    }
-                    //save local config
-
-                    guiConfig.LastConfigPath = filepath;
-                    win.SaveServerGuiConfig();
-
-                    var newConfig = win.GetServerConfigFromFileOrDefault(filepath);
-                    config.CopyFrom(newConfig);
+                    win.LoadServerConfig(filepath, config);
                 },
                 _inputFilters);
             });
