@@ -1,0 +1,1741 @@
+// [Script]
+// name = Deduplicate ship and solar assets
+// [Argument]
+// name = Input data folder
+// type = folder
+// [Argument]
+// name = Output folder
+// type = folder
+// [Argument]
+// name = Apply changes
+// type = flag
+// flag = apply
+// [Argument]
+// name = Keep embedded libraries
+// type = flag
+// flag = keep-embedded
+
+#nullable enable
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using LibreLancer.ContentEdit;
+using LibreLancer.ContentEdit.AssetDeduplication;
+using LibreLancer.Data;
+
+bool apply = false;
+bool keepEmbedded = false;
+FlagOption("apply", "Copy and rewrite assets after the report is generated", value => apply = value);
+FlagOption("keep-embedded", "Do not remove embedded material and texture libraries", value => keepEmbedded = value);
+
+ScriptUsage("input-data-folder output-folder [--apply] [--keep-embedded]");
+var args = ParseArguments(2);
+var input = Path.GetFullPath(args[0]);
+var output = Path.GetFullPath(args[1]);
+
+if (!Directory.Exists(input))
+{
+    Console.Error.WriteLine($"Input folder '{input}' does not exist.");
+    return;
+}
+
+if (Directory.Exists(Path.Combine(input, "DATA")))
+{
+    input = Path.Combine(input, "DATA");
+}
+
+if (IsWithin(output, input))
+{
+    Console.Error.WriteLine("The output folder must not be inside the input data folder.");
+    return;
+}
+
+if (apply && Directory.Exists(output) && Directory.EnumerateFileSystemEntries(output).Any())
+{
+    Console.Error.WriteLine($"Output folder '{output}' must be empty when --apply is used.");
+    return;
+}
+
+try
+{
+    Directory.CreateDirectory(output);
+    var run = ShipSolarDeduplicator.Run(input, output, apply, !keepEmbedded);
+    Console.WriteLine(run.Report);
+    foreach (var warning in run.Warnings)
+        Console.Error.WriteLine("WARNING: " + warning);
+    foreach (var error in run.Errors)
+        Console.Error.WriteLine("ERROR: " + error);
+
+    if (!run.Success)
+        return;
+}
+catch (Exception ex)
+{
+    var fatal = "Fatal deduplication error\n\n" + ex;
+    Console.Error.WriteLine(fatal);
+    File.WriteAllText(Path.Combine(output, "ll-dedup-errors.txt"), fatal);
+    return;
+}
+
+static bool IsWithin(string child, string parent)
+{
+    var childPath = Path.GetFullPath(child).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+    var parentPath = Path.GetFullPath(parent).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+    return childPath.StartsWith(parentPath, StringComparison.OrdinalIgnoreCase);
+}
+
+public sealed class ShipSolarDeduplicator
+{
+    private const string CommonLibraryName = "ll_common_assets.mat";
+    private static readonly string[] ModelExtensions = [".cmp", ".3db", ".dfm", ".sph", ".utf"];
+    private static readonly string[] LibraryExtensions = [".mat", ".txm", ".utf"];
+
+    public static void PrintMessages<T>(EditResult<T> result)
+    {
+        foreach (var message in result.Messages)
+            Console.WriteLine($"{message.Kind}: {message.Message}");
+    }
+
+        public static DedupRunResult Run(string input, string output, bool apply, bool stripEmbedded)
+        {
+            var state = new DedupState(input, output);
+            Console.WriteLine("Scanning archetype INIs...");
+            state.DiscoverArchetypes();
+            Console.WriteLine("Collecting faction and solar usage...");
+            state.DiscoverFactionUsage();
+            Console.WriteLine("Loading referenced models and libraries...");
+            state.LoadReferencedResources();
+            Console.WriteLine("Building canonical texture and material groups...");
+            state.BuildCanonicalResources();
+            state.WriteReport();
+
+        if (!apply)
+        {
+            return new DedupRunResult(true, state.Report.ToString(), state.Errors, state.Warnings);
+        }
+
+        if (state.Errors.Count > 0)
+        {
+            return new DedupRunResult(false, state.Report.ToString(), state.Errors, state.Warnings);
+        }
+
+        state.CopyInputTree();
+        state.WriteLibraries();
+        state.RewriteModels();
+        state.RewriteIniFiles();
+
+        var beforeStrip = state.ValidateOutput(expectStripped: false);
+        state.Report.AppendLine();
+        state.Report.AppendLine("Validation before stripping: " + (beforeStrip ? "PASS" : "FAIL"));
+        if (!beforeStrip)
+        {
+            state.Errors.Add("Validation failed before embedded libraries could be removed.");
+            state.WriteReport();
+            return new DedupRunResult(false, state.Report.ToString(), state.Errors, state.Warnings);
+        }
+
+        if (stripEmbedded)
+        {
+            state.StripEmbeddedLibraries();
+            var afterStrip = state.ValidateOutput(expectStripped: true);
+            state.Report.AppendLine("Validation after stripping: " + (afterStrip ? "PASS" : "FAIL"));
+            if (!afterStrip)
+            {
+                state.Errors.Add("Validation failed after embedded libraries were removed.");
+                state.WriteReport();
+                return new DedupRunResult(false, state.Report.ToString(), state.Errors, state.Warnings);
+            }
+        }
+
+        state.PruneReplacedLibraries();
+        if (state.Errors.Count > 0)
+        {
+            state.WriteReport();
+            return new DedupRunResult(false, state.Report.ToString(), state.Errors, state.Warnings);
+        }
+
+        state.WriteReport();
+        return new DedupRunResult(state.Errors.Count == 0, state.Report.ToString(), state.Errors, state.Warnings);
+    }
+
+    private sealed class DedupState
+    {
+        private readonly string input;
+        private readonly string output;
+        private readonly List<ArchetypeEntry> archetypes = [];
+        private readonly Dictionary<string, LibraryData> libraries = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ModelData> models = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<TextureResource> textures = [];
+        private readonly List<MaterialResource> materials = [];
+        private readonly Dictionary<string, string?> globalTextureNames = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, TextureResource> canonicalTextures = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, MaterialResource> canonicalMaterials = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> canonicalTextureLibraries = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> canonicalMaterialLibraries = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> unresolvedCanonicalMaterials = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> groupLibraryNames = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, List<string>> libraryShards = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> generatedLibraryNames = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> resolvedLibraryPaths = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> libraryLoadFailures = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> unresolvedWarnings = new(StringComparer.OrdinalIgnoreCase);
+
+        public readonly List<string> Errors = [];
+        public readonly List<string> Warnings = [];
+        public readonly StringBuilder Report = new();
+
+        public DedupState(string input, string output)
+        {
+            this.input = input;
+            this.output = output;
+        }
+
+        public void DiscoverArchetypes()
+        {
+            foreach (var file in Directory.EnumerateFiles(input, "*.ini", SearchOption.AllDirectories)
+                         .Where(x => IsArchetypeIni(x)))
+            {
+                ParseArchetypeIni(file);
+            }
+
+            Report.AppendLine("Ship/solar material deduplication report");
+            Report.AppendLine($"Input: {input}");
+            Report.AppendLine($"Archetypes: {archetypes.Count}");
+            Report.AppendLine();
+        }
+
+        public void DiscoverFactionUsage()
+        {
+            var npcToShip = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var npcFiles = Directory.EnumerateFiles(input, "*.ini", SearchOption.AllDirectories)
+                .Where(x => Path.GetFileName(x).Equals("npcships.ini", StringComparison.OrdinalIgnoreCase));
+            foreach (var file in npcFiles)
+            {
+                foreach (var section in ParseKeySections(file))
+                {
+                    var nickname = section.GetSingle("nickname");
+                    var ship = section.GetSingle("ship_archetype");
+                    if (!string.IsNullOrWhiteSpace(nickname) && !string.IsNullOrWhiteSpace(ship))
+                        npcToShip[nickname] = ship;
+                }
+            }
+
+            foreach (var file in Directory.EnumerateFiles(input, "*.ini", SearchOption.AllDirectories)
+                         .Where(x => Path.GetFileName(x).Equals("faction_props.ini", StringComparison.OrdinalIgnoreCase)))
+            {
+                foreach (var section in ParseKeySections(file))
+                {
+                    var faction = section.GetSingle("affiliation");
+                    if (string.IsNullOrWhiteSpace(faction))
+                        continue;
+
+                    foreach (var npc in section.GetAll("npc_ship"))
+                    {
+                        if (!npcToShip.TryGetValue(npc, out var shipNickname))
+                            continue;
+
+                        foreach (var archetype in archetypes.Where(x => x.Kind == "ship" &&
+                                                                         x.Nickname.Equals(shipNickname, StringComparison.OrdinalIgnoreCase)))
+                            archetype.Factions.Add(faction);
+                    }
+                }
+            }
+
+            var solarFactions = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.EnumerateFiles(input, "*.ini", SearchOption.AllDirectories)
+                         .Where(x => Path.GetFileName(x).Equals("universe.ini", StringComparison.OrdinalIgnoreCase) ||
+                                     Path.GetDirectoryName(x)?.Contains("universe", StringComparison.OrdinalIgnoreCase) == true))
+            {
+                foreach (var section in ParseKeySections(file))
+                {
+                    var archetype = section.GetSingle("archetype");
+                    var faction = section.GetSingle("faction");
+                    if (string.IsNullOrWhiteSpace(archetype) || string.IsNullOrWhiteSpace(faction))
+                        continue;
+                    if (!solarFactions.TryGetValue(archetype, out var set))
+                        solarFactions[archetype] = set = new(StringComparer.OrdinalIgnoreCase);
+                    set.Add(faction);
+                }
+            }
+
+            foreach (var archetype in archetypes.Where(x => x.Kind == "solar"))
+            {
+                if (solarFactions.TryGetValue(archetype.Nickname, out var factions))
+                    archetype.Factions.UnionWith(factions);
+            }
+        }
+
+        public void LoadReferencedResources()
+        {
+            foreach (var archetype in archetypes)
+            {
+                archetype.ModelPath = ResolveFile(archetype.ModelReference, ModelExtensions);
+                if (archetype.ModelPath == null)
+                {
+                    Errors.Add($"{archetype.IniPath}: {archetype.Nickname} model '{archetype.ModelReference}' was not found");
+                    continue;
+                }
+
+                if (!models.TryGetValue(archetype.ModelPath, out var model))
+                {
+                    try
+                    {
+                        var utf = new EditableUtf(archetype.ModelPath);
+                        model = new ModelData(archetype.ModelPath);
+                        models.Add(archetype.ModelPath, model);
+
+                        foreach (var embedded in ExtractEmbeddedLibraries(utf, model.SourcePath))
+                            model.LibraryIds.Add(embedded.Id);
+                    }
+                    catch (Exception ex)
+                    {
+                        Errors.Add($"{archetype.ModelPath}: could not parse UTF model: {ex.Message}");
+                        continue;
+                    }
+                }
+
+                foreach (var libraryReference in archetype.MaterialLibraries)
+                {
+                    var libraryPath = ResolveFile(libraryReference, LibraryExtensions);
+                    if (libraryPath == null)
+                    {
+                        MarkUnresolvedLibrary(model,
+                            $"{archetype.IniPath}: {archetype.Nickname} library '{libraryReference}' was not found");
+                        continue;
+                    }
+
+                    var library = LoadLibrary(libraryPath);
+                    if (library != null)
+                    {
+                        resolvedLibraryPaths.Add(libraryPath);
+                        model.LibraryIds.Add(library.Id);
+                    }
+                    else
+                        MarkUnresolvedLibrary(model,
+                            libraryLoadFailures.TryGetValue(libraryPath, out var failure)
+                                ? failure
+                                : $"{archetype.IniPath}: {archetype.Nickname} library '{libraryReference}' could not be loaded");
+                }
+            }
+
+            LoadAllShipSolarBaseModels();
+
+            var seenTextures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            textures.RemoveAll(x => !seenTextures.Add(SourceKey(x.SourceId, x.OriginalName)));
+            var seenMaterials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            materials.RemoveAll(x => x.Node == null || !seenMaterials.Add(SourceKey(x.SourceId, x.OriginalName)));
+        }
+
+        private void LoadAllShipSolarBaseModels()
+        {
+            foreach (var path in Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories)
+                         .Where(x => ModelExtensions.Contains(Path.GetExtension(x), StringComparer.OrdinalIgnoreCase))
+                         .Where(IsShipSolarOrBasePath))
+            {
+                if (models.ContainsKey(path))
+                    continue;
+
+                try
+                {
+                    var utf = new EditableUtf(path);
+                    var model = new ModelData(path);
+                    model.ExternalMaterialReferencesUnknown = true;
+                    models.Add(path, model);
+                    foreach (var embedded in ExtractEmbeddedLibraries(utf, path))
+                        model.LibraryIds.Add(embedded.Id);
+                    AddPhysicalModelGroup(model);
+                }
+                catch (Exception ex)
+                {
+                    AddWarning($"{path}: could not parse UTF model during full ship/solar/base scan: {ex.Message}");
+                }
+            }
+        }
+
+        private bool IsShipSolarOrBasePath(string path)
+        {
+            var relative = Path.GetRelativePath(input, path).Replace('\\', '/');
+            var parts = relative.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            return parts.Length > 1 &&
+                   (parts[0].Equals("ships", StringComparison.OrdinalIgnoreCase) ||
+                    parts[0].Equals("solar", StringComparison.OrdinalIgnoreCase) ||
+                    parts[0].Equals("bases", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private void AddPhysicalModelGroup(ModelData model)
+        {
+            var relative = Path.GetRelativePath(input, model.SourcePath);
+            var parts = relative.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2)
+                return;
+
+            if (parts[0].Equals("ships", StringComparison.OrdinalIgnoreCase))
+                model.Groups.Add("ship_" + SafeGroupName(parts[1]));
+            else if (parts[0].Equals("solar", StringComparison.OrdinalIgnoreCase))
+                model.Groups.Add("solar_" + SafeGroupName(parts[1]));
+            else if (parts[0].Equals("bases", StringComparison.OrdinalIgnoreCase))
+                model.Groups.Add("base_" + SafeGroupName(parts[1]));
+        }
+
+        public void BuildCanonicalResources()
+        {
+            Console.WriteLine($"Texture candidates: {textures.Count}; material candidates: {materials.Count}");
+            var textureGroups = textures
+                .GroupBy(x => x.Signature, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var group in textureGroups)
+            {
+                var representative = group.Where(x => x.Node != null)
+                    .OrderBy(x => x.SourceId, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(x => x.OriginalName, StringComparer.OrdinalIgnoreCase)
+                    .First();
+                representative.CanonicalName = "ll_tex_" + group.Key + ".dds";
+                canonicalTextures[representative.CanonicalName] = representative;
+                foreach (var texture in group)
+                {
+                    texture.CanonicalName = representative.CanonicalName;
+                }
+            }
+
+            foreach (var group in textures.GroupBy(x => x.OriginalName, StringComparer.OrdinalIgnoreCase))
+            {
+                var names = group.Select(x => x.CanonicalName).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                globalTextureNames[group.Key] = names.Length == 1 ? names[0] : null;
+            }
+
+            var materialGroups = materials
+                .GroupBy(x => MaterialSignature(x), StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var group in materialGroups)
+            {
+                var representative = group.OrderBy(x => x.SourceId, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(x => x.OriginalName, StringComparer.OrdinalIgnoreCase)
+                    .First();
+                representative.Signature = group.Key;
+                representative.CanonicalName = "ll_mat_" + group.Key;
+                canonicalMaterials[representative.CanonicalName] = representative;
+                foreach (var material in group)
+                {
+                    material.Signature = group.Key;
+                    material.CanonicalName = representative.CanonicalName;
+                }
+
+                if (!TryGetUnresolvedTextureReference(representative, out var missingTexture))
+                    continue;
+
+                unresolvedCanonicalMaterials.Add(representative.CanonicalName);
+                foreach (var material in group)
+                    ProtectModelsUsingLibrary(material.SourceId, "unresolved material texture reference");
+                AddWarning($"Material '{representative.OriginalName}' from '{representative.SourceId}' references unavailable texture '{missingTexture}'; affected models retain their embedded libraries");
+            }
+
+            BuildLibraryGroups();
+
+            Report.AppendLine($"Models: {models.Count}");
+            Report.AppendLine($"Textures: {textures.Count} -> {canonicalTextures.Count}");
+            Report.AppendLine($"Materials: {materials.Count} -> {canonicalMaterials.Count}");
+            Report.AppendLine($"Canonical materials omitted from generated libraries: {unresolvedCanonicalMaterials.Count}");
+            var textureBytesBefore = textures.Sum(x => x.PayloadBytes);
+            var textureBytesAfter = canonicalTextures.Values.Sum(x => NodeDataSize(x.Node!));
+            var materialBytesBefore = materials.Sum(x => x.PayloadBytes);
+            var materialBytesAfter = canonicalMaterials.Values.Sum(x => NodeDataSize(x.Node!));
+            Report.AppendLine($"Texture payload bytes: {textureBytesBefore:N0} -> {textureBytesAfter:N0} (saved {textureBytesBefore - textureBytesAfter:N0})");
+            Report.AppendLine($"Material payload bytes: {materialBytesBefore:N0} -> {materialBytesAfter:N0} (saved {materialBytesBefore - materialBytesAfter:N0})");
+            Report.AppendLine();
+            Report.AppendLine("Unresolved library references (embedded libraries retained on affected models during apply):");
+            if (Warnings.Count == 0)
+                Report.AppendLine("  none");
+            else
+                foreach (var warning in Warnings)
+                    Report.AppendLine("  " + warning);
+            Report.AppendLine();
+            Report.AppendLine("Texture duplicate groups:");
+            foreach (var group in textures.GroupBy(x => x.Signature).Where(x => x.Count() > 1))
+            {
+                Report.AppendLine($"  {group.Key[..16]} ({group.Count()} copies): {string.Join(", ", group.Select(x => x.OriginalName).Distinct(StringComparer.OrdinalIgnoreCase))}");
+            }
+
+            Report.AppendLine("Material duplicate groups:");
+            foreach (var group in materials.GroupBy(x => x.Signature).Where(x => x.Count() > 1))
+            {
+                Report.AppendLine($"  {group.Key[..16]} ({group.Count()} copies): {string.Join(", ", group.Select(x => x.OriginalName).Distinct(StringComparer.OrdinalIgnoreCase))}");
+            }
+
+            Report.AppendLine();
+            Report.AppendLine("Archetype usage:");
+            foreach (var archetype in archetypes.OrderBy(x => x.Kind).ThenBy(x => x.Nickname, StringComparer.OrdinalIgnoreCase))
+            {
+                var factions = archetype.Factions.Count == 0 ? "-" : string.Join(",", archetype.Factions.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+                Report.AppendLine($"  {archetype.Kind}\t{archetype.Nickname}\t{factions}\t{archetype.SolarType ?? "-"}\t{archetype.ModelPath ?? "MISSING"}");
+            }
+        }
+
+        private void BuildLibraryGroups()
+        {
+            foreach (var archetype in archetypes.Where(x => x.ModelPath != null))
+            {
+                if (!models.TryGetValue(archetype.ModelPath!, out var model))
+                    continue;
+                foreach (var group in GroupsForArchetype(archetype))
+                    model.Groups.Add(group);
+            }
+
+            var textureGroups = canonicalTextures.Keys.ToDictionary(
+                x => x,
+                _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                StringComparer.OrdinalIgnoreCase);
+            var materialGroups = canonicalMaterials.Keys.ToDictionary(
+                x => x,
+                _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (var model in models.Values)
+            {
+                foreach (var texture in textures.Where(x => model.LibraryIds.Contains(x.SourceId)))
+                    AddGroups(textureGroups[texture.CanonicalName], model.Groups);
+                foreach (var material in materials.Where(x => model.LibraryIds.Contains(x.SourceId)))
+                {
+                    if (unresolvedCanonicalMaterials.Contains(material.CanonicalName))
+                        continue;
+                    AddGroups(materialGroups[material.CanonicalName], model.Groups);
+                }
+            }
+
+            foreach (var material in canonicalMaterials.Values)
+            {
+                if (unresolvedCanonicalMaterials.Contains(material.CanonicalName))
+                    continue;
+                var map = TextureMapForSource(material.SourceId);
+                foreach (var child in material.Node!.Children ?? [])
+                {
+                    if (!IsTextureReference(child.Name) || child.StringData is not { } originalTexture ||
+                        !map.TryGetValue(originalTexture, out var canonicalTexture))
+                        continue;
+                    AddGroups(textureGroups[canonicalTexture], materialGroups[material.CanonicalName]);
+                }
+            }
+
+            foreach (var texture in canonicalTextures.Values)
+            {
+                var library = LibraryForGroups(textureGroups[texture.CanonicalName]);
+                canonicalTextureLibraries[texture.CanonicalName] = library;
+                generatedLibraryNames.Add(library);
+            }
+
+            foreach (var material in canonicalMaterials.Values)
+            {
+                if (unresolvedCanonicalMaterials.Contains(material.CanonicalName))
+                    continue;
+                var library = LibraryForGroups(materialGroups[material.CanonicalName]);
+                canonicalMaterialLibraries[material.CanonicalName] = library;
+                generatedLibraryNames.Add(library);
+            }
+
+            BuildLibraryShards();
+
+            Report.AppendLine($"Generated material libraries (.mat): {generatedLibraryNames.Count}");
+            foreach (var library in generatedLibraryNames.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                Report.AppendLine("  " + library);
+            Report.AppendLine();
+        }
+
+        private static void AddGroups(HashSet<string> destination, IEnumerable<string> groups)
+        {
+            foreach (var group in groups)
+                destination.Add(group);
+        }
+
+        private void BuildLibraryShards()
+        {
+            const long shardTargetBytes = 28L * 1024 * 1024;
+            const long hardLimitBytes = 32L * 1024 * 1024;
+            var logicalTextureLibraries = new Dictionary<string, string>(canonicalTextureLibraries, StringComparer.OrdinalIgnoreCase);
+            var logicalMaterialLibraries = new Dictionary<string, string>(canonicalMaterialLibraries, StringComparer.OrdinalIgnoreCase);
+            var logicalLibraries = logicalTextureLibraries.Values
+                .Concat(logicalMaterialLibraries.Values)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            generatedLibraryNames.Clear();
+            libraryShards.Clear();
+
+            foreach (var logicalLibrary in logicalLibraries)
+            {
+                var items = new List<(string Name, bool Texture, long Size)>();
+                foreach (var texture in canonicalTextures.Values.Where(x =>
+                             logicalTextureLibraries[x.CanonicalName].Equals(logicalLibrary, StringComparison.OrdinalIgnoreCase)))
+                    items.Add((texture.CanonicalName, true, NodeDataSize(texture.Node!) + 4096));
+                foreach (var material in canonicalMaterials.Values.Where(x =>
+                             !unresolvedCanonicalMaterials.Contains(x.CanonicalName) &&
+                             logicalMaterialLibraries[x.CanonicalName].Equals(logicalLibrary, StringComparison.OrdinalIgnoreCase)))
+                    items.Add((material.CanonicalName, false, NodeDataSize(material.Node!) + 4096));
+
+                var shards = new List<List<(string Name, bool Texture, long Size)>>();
+                var current = new List<(string Name, bool Texture, long Size)>();
+                long currentSize = 0;
+                foreach (var item in items.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (item.Size > hardLimitBytes)
+                        AddWarning($"Resource '{item.Name}' is estimated at {item.Size:N0} bytes and cannot fit under the 32 MiB library limit");
+
+                    if (current.Count > 0 && currentSize + item.Size > shardTargetBytes)
+                    {
+                        shards.Add(current);
+                        current = [];
+                        currentSize = 0;
+                    }
+
+                    current.Add(item);
+                    currentSize += item.Size;
+                }
+                if (current.Count > 0)
+                    shards.Add(current);
+
+                var shardNames = new List<string>();
+                for (var i = 0; i < shards.Count; i++)
+                {
+                    var shardBase = shards.Count == 1
+                        ? Path.GetFileNameWithoutExtension(logicalLibrary)
+                        : Path.GetFileNameWithoutExtension(logicalLibrary) + "_" + (i + 1).ToString("D3");
+                    var materialLibrary = shardBase + ".mat";
+                    shardNames.Add(materialLibrary);
+                    generatedLibraryNames.Add(materialLibrary);
+                    foreach (var item in shards[i])
+                    {
+                        if (item.Texture)
+                            canonicalTextureLibraries[item.Name] = materialLibrary;
+                        else
+                            canonicalMaterialLibraries[item.Name] = materialLibrary;
+                    }
+                }
+
+                libraryShards[logicalLibrary] = shardNames;
+            }
+
+            foreach (var model in models.Values)
+            {
+                model.RequiredLibraries.Clear();
+                foreach (var texture in textures.Where(x => model.LibraryIds.Contains(x.SourceId)))
+                {
+                    if (canonicalTextureLibraries.TryGetValue(texture.CanonicalName, out var library))
+                        model.RequiredLibraries.Add(library);
+                }
+
+                foreach (var material in materials.Where(x => model.LibraryIds.Contains(x.SourceId)))
+                {
+                    if (canonicalMaterialLibraries.TryGetValue(material.CanonicalName, out var materialLibrary))
+                        model.RequiredLibraries.Add(materialLibrary);
+
+                    var map = TextureMapForSource(material.SourceId);
+                    foreach (var child in material.Node!.Children ?? [])
+                    {
+                        if (IsTextureReference(child.Name) && child.StringData is { } originalTexture &&
+                            map.TryGetValue(originalTexture, out var canonicalTexture) &&
+                            canonicalTextureLibraries.TryGetValue(canonicalTexture, out var textureLibrary))
+                            model.RequiredLibraries.Add(textureLibrary);
+                    }
+                }
+            }
+        }
+
+        private string LibraryForGroups(HashSet<string> groups)
+        {
+            if (groups.Count != 1)
+                return CommonLibraryName;
+
+            var group = groups.First();
+            if (!groupLibraryNames.TryGetValue(group, out var library))
+            {
+                library = "ll_" + group + "_assets.mat";
+                groupLibraryNames[group] = library;
+            }
+            return library;
+        }
+
+        private IEnumerable<string> GroupsForArchetype(ArchetypeEntry archetype)
+        {
+            if (archetype.Kind.Equals("ship", StringComparison.OrdinalIgnoreCase))
+            {
+                var relativeModel = archetype.ModelPath == null ? null : Path.GetRelativePath(input, archetype.ModelPath);
+                var shipFolder = FirstFolderAfter(relativeModel, "ships");
+                yield return "ship_" + SafeGroupName(shipFolder ?? "unknown");
+                yield break;
+            }
+
+            if (archetype.Kind.Equals("solar", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(archetype.SolarType))
+            {
+                yield return "solar_" + SafeGroupName(archetype.SolarType!);
+                yield break;
+            }
+
+            yield return SafeGroupName(archetype.Kind);
+        }
+
+        private static string? FirstFolderAfter(string? relativePath, string parentFolder)
+        {
+            if (string.IsNullOrWhiteSpace(relativePath))
+                return null;
+
+            var parts = relativePath.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+            for (var i = 0; i + 1 < parts.Length; i++)
+            {
+                if (parts[i].Equals(parentFolder, StringComparison.OrdinalIgnoreCase))
+                    return parts[i + 1];
+            }
+
+            return null;
+        }
+
+        private static string SafeGroupName(string value)
+        {
+            var builder = new StringBuilder();
+            foreach (var character in value.Trim().ToLowerInvariant())
+                builder.Append(char.IsLetterOrDigit(character) ? character : '_');
+            return builder.Length == 0 ? "unknown" : builder.ToString().Trim('_');
+        }
+
+        public void CopyInputTree()
+        {
+            Directory.CreateDirectory(output);
+            foreach (var directory in Directory.EnumerateDirectories(input, "*", SearchOption.AllDirectories))
+            {
+                Directory.CreateDirectory(Path.Combine(output, Path.GetRelativePath(input, directory)));
+            }
+
+            foreach (var file in Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories))
+            {
+                var destination = Path.Combine(output, Path.GetRelativePath(input, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file, destination, overwrite: false);
+            }
+        }
+
+        public void WriteLibraries()
+        {
+            foreach (var libraryName in generatedLibraryNames.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            {
+                var utf = new EditableUtf();
+                var materialLibrary = NewIntermediate(utf.Root, "Material Library");
+                var textureLibrary = NewIntermediate(utf.Root, "Texture Library");
+
+                foreach (var texture in canonicalTextures.Values
+                             .Where(x => canonicalTextureLibraries[x.CanonicalName].Equals(libraryName, StringComparison.OrdinalIgnoreCase))
+                             .OrderBy(x => x.CanonicalName, StringComparer.OrdinalIgnoreCase))
+                {
+                    textureLibrary.Children.Add(CloneNode(texture.Node!, textureLibrary, texture.CanonicalName));
+                }
+
+                foreach (var material in canonicalMaterials.Values
+                             .Where(x => !unresolvedCanonicalMaterials.Contains(x.CanonicalName))
+                             .Where(x => canonicalMaterialLibraries[x.CanonicalName].Equals(libraryName, StringComparison.OrdinalIgnoreCase))
+                             .OrderBy(x => x.CanonicalName, StringComparer.OrdinalIgnoreCase))
+                {
+                    var textureMap = TextureMapForSource(material.SourceId);
+                    materialLibrary.Children.Add(CloneNode(material.Node!, materialLibrary, material.CanonicalName, textureMap));
+                }
+
+                var libraryPath = Path.Combine(output, libraryName);
+                var result = utf.Save(libraryPath, 0);
+                PrintMessages(result);
+                if (result.IsError)
+                    Errors.Add($"Could not write resource library '{libraryPath}'");
+                else if (new FileInfo(libraryPath).Length > 32L * 1024 * 1024)
+                    AddWarning($"Generated resource library '{libraryPath}' is larger than 32 MiB ({new FileInfo(libraryPath).Length:N0} bytes)");
+            }
+        }
+
+        public void RewriteModels()
+        {
+            foreach (var model in models.Values)
+            {
+                if (model.KeepEmbeddedLibraries)
+                {
+                    Report.AppendLine($"Preserved model references: {model.SourcePath} ({model.KeepEmbeddedReason ?? "protected model"})");
+                    continue;
+                }
+
+                var crcMap = new Dictionary<uint, uint>();
+                var materialNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var libraryId in model.LibraryIds)
+                {
+                    foreach (var material in materials.Where(x => x.SourceId.Equals(libraryId, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var oldCrc = CrcTool.FLModelCrc(material.OriginalName);
+                        var newCrc = CrcTool.FLModelCrc(material.CanonicalName);
+                        if (crcMap.TryGetValue(oldCrc, out var existing) && existing != newCrc)
+                        {
+                            model.KeepEmbeddedLibraries = true;
+                            model.KeepEmbeddedReason ??= "material CRC conflict";
+                            AddWarning($"{model.SourcePath}: material CRC 0x{oldCrc:X8} has conflicting canonical targets; embedded libraries retained");
+                            continue;
+                        }
+                        crcMap[oldCrc] = newCrc;
+                        materialNames[material.OriginalName] = material.CanonicalName;
+                    }
+                }
+
+                try
+                {
+                    var outputPath = Path.Combine(output, Path.GetRelativePath(input, model.SourcePath));
+                    var utf = new EditableUtf(outputPath);
+                    if (HasUnknownMaterialReferences(utf, crcMap, materialNames))
+                    {
+                        model.KeepEmbeddedLibraries = true;
+                        model.KeepEmbeddedReason ??= "unresolved external material reference";
+                        Report.AppendLine($"Preserved model references: {model.SourcePath} ({model.KeepEmbeddedReason})");
+                        continue;
+                    }
+                    UtfAssetRewriter.RewriteVmeshMaterialCrcs(utf.Root, crcMap);
+                    UtfAssetRewriter.RewriteMaterialNames(utf.Root, materialNames);
+                    var result = utf.Save(outputPath, 0);
+                    PrintMessages(result);
+                    if (result.IsError)
+                        Errors.Add($"Could not write rewritten model '{outputPath}'");
+                }
+                catch (Exception ex)
+                {
+                    Errors.Add($"{model.SourcePath}: model rewrite failed: {ex.Message}");
+                }
+            }
+        }
+
+        public void RewriteIniFiles()
+        {
+            foreach (var group in archetypes.Where(x => x.ModelPath != null).GroupBy(x => x.IniPath, StringComparer.OrdinalIgnoreCase))
+            {
+                var outputIni = Path.Combine(output, Path.GetRelativePath(input, group.Key));
+                if (!File.Exists(outputIni))
+                    continue;
+
+                var lines = File.ReadAllLines(outputIni).ToList();
+                var sections = ParseSections(lines.ToArray());
+                foreach (var section in sections.OrderByDescending(x => x.StartLine))
+                {
+                    var entry = group.FirstOrDefault(x => x.SectionStart == section.StartLine && x.ModelPath != null);
+                    if (entry == null)
+                        continue;
+
+                    if (entry.ModelPath != null && models.TryGetValue(entry.ModelPath, out var model) &&
+                        model.KeepEmbeddedLibraries)
+                        continue;
+
+                    ReplaceMaterialLibraryLines(lines, section, LibraryNamesForArchetype(entry));
+                }
+
+                File.WriteAllLines(outputIni, lines);
+            }
+        }
+
+        private IReadOnlyList<string> LibraryNamesForArchetype(ArchetypeEntry archetype)
+        {
+            if (archetype.ModelPath != null && models.TryGetValue(archetype.ModelPath, out var model))
+            {
+                if (model.KeepEmbeddedLibraries)
+                {
+                    return archetype.MaterialLibraries
+                        .Where(x => ResolveOutputFile(x, LibraryExtensions) != null)
+                        .ToArray();
+                }
+
+                if (model.RequiredLibraries.Count > 0)
+                    return model.RequiredLibraries.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+            }
+
+            return generatedLibraryNames.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Take(1).ToArray();
+        }
+
+        public void StripEmbeddedLibraries()
+        {
+            var strippedModels = 0;
+            var keptModels = 0;
+            foreach (var model in models.Values)
+            {
+                if (model.KeepEmbeddedLibraries)
+                {
+                    keptModels++;
+                    Report.AppendLine($"Kept embedded libraries: {model.SourcePath} ({model.KeepEmbeddedReason ?? "unresolved material-library reference"})");
+                    continue;
+                }
+
+                var outputPath = Path.Combine(output, Path.GetRelativePath(input, model.SourcePath));
+                var utf = new EditableUtf(outputPath);
+                var removed = UtfAssetRewriter.RemoveEmbeddedLibraries(utf.Root);
+                if (removed == 0)
+                    continue;
+                strippedModels++;
+                var result = utf.Save(outputPath, 0);
+                PrintMessages(result);
+                if (result.IsError)
+                    Errors.Add($"Could not strip embedded libraries from '{outputPath}'");
+            }
+
+            Report.AppendLine($"Embedded library stripping: stripped {strippedModels} models; kept {keptModels} protected models");
+        }
+
+        public void PruneReplacedLibraries()
+        {
+            var referencedLibraries = FindOutputMaterialLibraryReferences();
+            var removed = 0;
+            long removedBytes = 0;
+
+            foreach (var sourcePath in resolvedLibraryPaths.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            {
+                var outputPath = Path.Combine(output, Path.GetRelativePath(input, sourcePath));
+                if (!File.Exists(outputPath) || referencedLibraries.Contains(Path.GetFullPath(outputPath)))
+                    continue;
+
+                try
+                {
+                    var length = new FileInfo(outputPath).Length;
+                    File.Delete(outputPath);
+                    removed++;
+                    removedBytes += length;
+                    Report.AppendLine($"Removed replaced material library: {outputPath}");
+                }
+                catch (Exception ex)
+                {
+                    Errors.Add($"Could not remove replaced material library '{outputPath}': {ex.Message}");
+                }
+            }
+
+            Report.AppendLine($"Removed replaced material libraries: {removed} (saved {removedBytes:N0} bytes)");
+        }
+
+        private HashSet<string> FindOutputMaterialLibraryReferences()
+        {
+            var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var ini in Directory.EnumerateFiles(output, "*.ini", SearchOption.AllDirectories))
+            {
+                foreach (var line in File.ReadLines(ini))
+                {
+                    if (!TryParseKey(line, out var key, out var value) ||
+                        !key.Equals("material_library", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var path = ResolveOutputFile(value, LibraryExtensions);
+                    if (path != null)
+                        referenced.Add(path);
+                }
+            }
+
+            return referenced;
+        }
+
+        private string? ResolveOutputFile(string reference, string[] extensions)
+        {
+            var value = reference.Trim().Trim('"').Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar)
+                .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var candidate = Path.GetFullPath(Path.Combine(output, value));
+            if (File.Exists(candidate))
+                return candidate;
+
+            if (string.IsNullOrEmpty(Path.GetExtension(candidate)))
+            {
+                foreach (var extension in extensions)
+                {
+                    candidate = Path.ChangeExtension(Path.Combine(output, value), extension);
+                    if (File.Exists(candidate))
+                        return Path.GetFullPath(candidate);
+                }
+            }
+
+            return null;
+        }
+
+        public bool ValidateOutput(bool expectStripped)
+        {
+            var valid = true;
+            if (generatedLibraryNames.Count == 0)
+            {
+                Errors.Add("No generated material libraries exist");
+                return false;
+            }
+
+            var materialNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var textureNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var materialTextureReferences = new List<(string Material, string Texture)>();
+            var modelsWithEmbeddedLibraries = 0;
+            var embeddedMaterialLibraryCount = 0;
+            var embeddedTextureLibraryCount = 0;
+            var protectedModelsWithEmbeddedLibraries = 0;
+            foreach (var libraryName in generatedLibraryNames.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            {
+                var libraryPath = Path.Combine(output, libraryName);
+                if (!File.Exists(libraryPath))
+                {
+                    Errors.Add($"Generated material library '{libraryPath}' does not exist");
+                    valid = false;
+                    continue;
+                }
+
+                try
+                {
+                    var libraryRoot = new EditableUtf(libraryPath).Root;
+                    foreach (var library in libraryRoot.IterateAll())
+                    {
+                        if (library.Name.Equals("Material Library", StringComparison.OrdinalIgnoreCase) && library.Children != null)
+                        {
+                            foreach (var material in library.Children)
+                            {
+                                if (!materialNames.Add(material.Name))
+                                {
+                                    Errors.Add($"Duplicate canonical material name '{material.Name}'");
+                                    valid = false;
+                                }
+
+                                foreach (var child in material.Children ?? [])
+                                {
+                                    if (IsTextureReference(child.Name) && child.StringData is { } texture)
+                                        materialTextureReferences.Add((material.Name, texture));
+                                }
+                            }
+                        }
+                        else if (library.Name.Equals("Texture Library", StringComparison.OrdinalIgnoreCase) && library.Children != null)
+                        {
+                            foreach (var texture in library.Children)
+                                textureNames.Add(texture.Name);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Errors.Add($"Could not reload material library '{libraryPath}': {ex.Message}");
+                    valid = false;
+                }
+            }
+
+            foreach (var reference in materialTextureReferences)
+            {
+                if (!textureNames.Contains(reference.Texture))
+                {
+                    Errors.Add($"Material '{reference.Material}' references missing texture '{reference.Texture}'");
+                    valid = false;
+                }
+            }
+
+            foreach (var archetype in archetypes.Where(x => x.ModelPath != null))
+            {
+                var outputIni = Path.Combine(output, Path.GetRelativePath(input, archetype.IniPath));
+                if (!File.Exists(outputIni))
+                {
+                    Errors.Add($"Rewritten archetype INI '{outputIni}' does not exist");
+                    valid = false;
+                    continue;
+                }
+
+                var lines = File.ReadAllLines(outputIni);
+                var section = ParseSections(lines).FirstOrDefault(x =>
+                    x.Name.Equals(archetype.SectionName, StringComparison.OrdinalIgnoreCase) &&
+                    x.GetSingle(lines, "nickname")?.Equals(archetype.Nickname, StringComparison.OrdinalIgnoreCase) == true);
+                var assigned = section?.GetAll(lines, "material_library").ToArray() ?? [];
+                var assignedPaths = assigned
+                    .Select(x => ResolveOutputFile(x, LibraryExtensions))
+                    .Where(x => x != null)
+                    .Select(x => x!)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var expectedLibrary in LibraryNamesForArchetype(archetype))
+                {
+                    var expectedPath = Path.GetFullPath(Path.Combine(output, expectedLibrary));
+                    if (!assignedPaths.Contains(expectedPath))
+                    {
+                        Errors.Add($"{outputIni}: {archetype.Nickname} does not reference '{expectedLibrary}'");
+                        valid = false;
+                    }
+                }
+            }
+
+            foreach (var model in models.Values)
+            {
+                var outputPath = Path.Combine(output, Path.GetRelativePath(input, model.SourcePath));
+                if (!File.Exists(outputPath))
+                {
+                    Errors.Add($"Rewritten model '{outputPath}' does not exist");
+                    valid = false;
+                    continue;
+                }
+
+                try
+                {
+                    var utf = new EditableUtf(outputPath);
+                    var embeddedMaterialLibraries = utf.Root.IterateAll()
+                        .Count(x => x.Name.Equals("Material Library", StringComparison.OrdinalIgnoreCase));
+                    var embeddedTextureLibraries = utf.Root.IterateAll()
+                        .Count(x => x.Name.Equals("Texture Library", StringComparison.OrdinalIgnoreCase));
+                    if (embeddedMaterialLibraries > 0 || embeddedTextureLibraries > 0)
+                    {
+                        modelsWithEmbeddedLibraries++;
+                        embeddedMaterialLibraryCount += embeddedMaterialLibraries;
+                        embeddedTextureLibraryCount += embeddedTextureLibraries;
+                        if (model.KeepEmbeddedLibraries)
+                            protectedModelsWithEmbeddedLibraries++;
+                    }
+
+                    var availableMaterialNames = new HashSet<string>(materialNames, StringComparer.OrdinalIgnoreCase);
+                    if (model.KeepEmbeddedLibraries)
+                    {
+                        foreach (var materialLibrary in utf.Root.IterateAll().Where(x =>
+                                     x.Name.Equals("Material Library", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            foreach (var material in materialLibrary.Children ?? [])
+                                availableMaterialNames.Add(material.Name);
+                        }
+
+                        foreach (var material in materials.Where(x => model.LibraryIds.Contains(x.SourceId)))
+                            availableMaterialNames.Add(material.OriginalName);
+                    }
+
+                    var validateMaterialReferences = !model.KeepEmbeddedLibraries;
+                    if (validateMaterialReferences)
+                    {
+                        foreach (var crc in UtfAssetRewriter.EnumerateVmeshMaterialCrcs(utf.Root))
+                        {
+                            if (crc == 0)
+                                continue;
+                            var material = availableMaterialNames.FirstOrDefault(x => CrcTool.FLModelCrc(x) == crc);
+                            if (material == null)
+                            {
+                                Errors.Add($"Model '{outputPath}' references missing material CRC 0x{crc:X8}");
+                                valid = false;
+                            }
+                        }
+
+                        foreach (var materialName in utf.Root.IterateAll()
+                                     .Where(x => x.Name.Equals("material_name", StringComparison.OrdinalIgnoreCase))
+                                     .Select(x => x.StringData)
+                                     .Where(x => x != null))
+                        {
+                            if (!availableMaterialNames.Contains(materialName!))
+                            {
+                                Errors.Add($"Model '{outputPath}' references missing material '{materialName}'");
+                                valid = false;
+                            }
+                        }
+                    }
+
+                    if (expectStripped && !model.KeepEmbeddedLibraries &&
+                        (embeddedMaterialLibraries > 0 || embeddedTextureLibraries > 0))
+                    {
+                        Errors.Add($"Model '{outputPath}' still contains {embeddedMaterialLibraries} embedded material libraries and {embeddedTextureLibraries} embedded texture libraries");
+                        valid = false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Errors.Add($"Could not validate model '{outputPath}': {ex.Message}");
+                    valid = false;
+                }
+            }
+
+            Report.AppendLine($"Embedded resource check ({(expectStripped ? "after stripping" : "before stripping")}): scanned {models.Count} models; {modelsWithEmbeddedLibraries} contain embedded libraries ({embeddedMaterialLibraryCount} material, {embeddedTextureLibraryCount} texture); {protectedModelsWithEmbeddedLibraries} protected models retain them");
+
+            return valid && Errors.Count == 0;
+        }
+
+        public void WriteReport()
+        {
+            var reportPath = Path.Combine(output, "ll-dedup-report.txt");
+            Directory.CreateDirectory(output);
+            var report = new StringBuilder(Report.ToString());
+            if (Warnings.Count > 0)
+            {
+                report.AppendLine();
+                report.AppendLine("Warnings recorded during processing:");
+                foreach (var warning in Warnings)
+                    report.AppendLine("  " + warning);
+            }
+            if (Errors.Count > 0)
+            {
+                report.AppendLine();
+                report.AppendLine("Errors:");
+                foreach (var error in Errors)
+                    report.AppendLine("  " + error);
+            }
+            File.WriteAllText(reportPath, report.ToString());
+            var manifestPath = Path.Combine(output, "ll-dedup-manifest.tsv");
+            var manifest = new StringBuilder();
+            manifest.AppendLine("kind\toriginal\tcanonical\tsignature\tsource");
+            foreach (var texture in textures.OrderBy(x => x.OriginalName, StringComparer.OrdinalIgnoreCase))
+                manifest.AppendLine($"texture\t{texture.OriginalName}\t{texture.CanonicalName}\t{texture.Signature}\t{texture.SourceId}");
+            foreach (var material in materials.OrderBy(x => x.OriginalName, StringComparer.OrdinalIgnoreCase))
+                manifest.AppendLine($"material\t{material.OriginalName}\t{material.CanonicalName}\t{material.Signature}\t{material.SourceId}");
+            File.WriteAllText(manifestPath, manifest.ToString());
+        }
+
+        private string MaterialSignature(MaterialResource material)
+        {
+            var map = TextureMapForSource(material.SourceId);
+            return UtfAssetRewriter.HashMaterialNode(material.Node!, map);
+        }
+
+        private Dictionary<string, string> TextureMapForSource(string sourceId)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var embeddedMarker = sourceId.IndexOf("#embedded#", StringComparison.OrdinalIgnoreCase);
+            var embeddedModel = embeddedMarker >= 0 ? sourceId[..embeddedMarker] : null;
+            foreach (var texture in textures.Where(x => x.SourceId.Equals(sourceId, StringComparison.OrdinalIgnoreCase)))
+                map[texture.OriginalName] = texture.CanonicalName;
+            if (embeddedModel != null)
+            {
+                foreach (var texture in textures.Where(x => x.SourceId.StartsWith(embeddedModel + "#embedded#", StringComparison.OrdinalIgnoreCase)))
+                    map.TryAdd(texture.OriginalName, texture.CanonicalName);
+            }
+            foreach (var texture in textures.Where(x => globalTextureNames.TryGetValue(x.OriginalName, out var value) &&
+                                                         value != null))
+                map.TryAdd(texture.OriginalName, texture.CanonicalName);
+            return map;
+        }
+
+        private LibraryData? LoadLibrary(string path)
+        {
+            if (libraries.TryGetValue(path, out var existing))
+                return existing;
+
+            try
+            {
+                var utf = new EditableUtf(path);
+                var library = new LibraryData(path);
+                CollectLibraryNodes(library, utf.Root);
+                RegisterLibraryResources(library);
+                library.Textures.Clear();
+                library.Materials.Clear();
+                libraries.Add(path, library);
+                return library;
+            }
+            catch (Exception ex)
+            {
+                libraryLoadFailures[path] = $"{path}: could not parse resource library: {ex.Message}";
+                return null;
+            }
+        }
+
+        private void MarkUnresolvedLibrary(ModelData model, string message)
+        {
+            model.KeepEmbeddedLibraries = true;
+            model.KeepEmbeddedReason ??= "unresolved material-library reference";
+            AddWarning(message);
+        }
+
+        private void AddWarning(string message)
+        {
+            if (unresolvedWarnings.Add(message))
+                Warnings.Add(message);
+        }
+
+        private bool TryGetUnresolvedTextureReference(MaterialResource material, out string missingTexture)
+        {
+            var map = TextureMapForSource(material.SourceId);
+            foreach (var child in material.Node!.IterateAll())
+            {
+                if (!IsTextureReference(child.Name) || child.StringData is not { } texture ||
+                    string.IsNullOrWhiteSpace(texture))
+                    continue;
+                if (!map.ContainsKey(texture))
+                {
+                    missingTexture = texture;
+                    return true;
+                }
+            }
+
+            missingTexture = string.Empty;
+            return false;
+        }
+
+        private void ProtectModelsUsingLibrary(string libraryId, string reason)
+        {
+            foreach (var model in models.Values.Where(x => x.LibraryIds.Contains(libraryId)))
+            {
+                model.KeepEmbeddedLibraries = true;
+                model.KeepEmbeddedReason ??= reason;
+            }
+        }
+
+        private static bool HasUnknownMaterialReferences(
+            EditableUtf utf,
+            IReadOnlyDictionary<uint, uint> crcMap,
+            IReadOnlyDictionary<string, string> materialNames)
+        {
+            foreach (var crc in UtfAssetRewriter.EnumerateVmeshMaterialCrcs(utf.Root))
+            {
+                if (crc != 0 && !crcMap.ContainsKey(crc))
+                    return true;
+            }
+
+            foreach (var name in utf.Root.IterateAll()
+                         .Where(x => x.Name.Equals("material_name", StringComparison.OrdinalIgnoreCase))
+                         .Select(x => x.StringData)
+                         .Where(x => !string.IsNullOrWhiteSpace(x)))
+            {
+                if (!materialNames.ContainsKey(name!))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private IEnumerable<LibraryData> ExtractEmbeddedLibraries(EditableUtf utf, string modelPath)
+        {
+            var index = 0;
+            foreach (var libraryNode in utf.Root.IterateAll().Where(x =>
+                         x.Name.Equals("Material Library", StringComparison.OrdinalIgnoreCase) ||
+                         x.Name.Equals("Texture Library", StringComparison.OrdinalIgnoreCase)))
+            {
+                var id = modelPath + "#embedded#" + index++;
+                if (libraries.ContainsKey(id))
+                    continue;
+                var library = new LibraryData(id);
+                if (libraryNode.Name.Equals("Material Library", StringComparison.OrdinalIgnoreCase))
+                    CollectMaterialNodes(library, libraryNode);
+                else
+                    CollectTextureNodes(library, libraryNode);
+                RegisterLibraryResources(library);
+                library.Textures.Clear();
+                library.Materials.Clear();
+                libraries.Add(id, library);
+                yield return library;
+            }
+        }
+
+        private void RegisterLibraryResources(LibraryData library)
+        {
+            foreach (var texture in library.Textures)
+            {
+                texture.Signature = UtfAssetRewriter.HashTextureNode(texture.Node!);
+                texture.CanonicalName = "ll_tex_" + texture.Signature + ".dds";
+                textures.Add(texture);
+
+                if (canonicalTextures.TryGetValue(texture.CanonicalName, out var existing))
+                {
+                    if (string.Compare(existing.SourceId, texture.SourceId, StringComparison.OrdinalIgnoreCase) > 0 ||
+                        (existing.SourceId.Equals(texture.SourceId, StringComparison.OrdinalIgnoreCase) &&
+                         string.Compare(existing.OriginalName, texture.OriginalName, StringComparison.OrdinalIgnoreCase) > 0))
+                    {
+                        existing.Node = null;
+                        canonicalTextures[texture.CanonicalName] = texture;
+                    }
+                    else
+                    {
+                        texture.Node = null;
+                    }
+                }
+                else
+                {
+                    canonicalTextures.Add(texture.CanonicalName, texture);
+                }
+
+                if ((textures.Count & 15) == 0)
+                    GC.Collect(2, GCCollectionMode.Forced, blocking: false, compacting: false);
+            }
+
+            foreach (var material in library.Materials)
+                materials.Add(material);
+        }
+
+        private static void CollectLibraryNodes(LibraryData library, LUtfNode root)
+        {
+            foreach (var node in root.IterateAll().Where(x =>
+                         x.Name.Equals("Material Library", StringComparison.OrdinalIgnoreCase) ||
+                         x.Name.Equals("Texture Library", StringComparison.OrdinalIgnoreCase)))
+            {
+                if (node.Name.Equals("Material Library", StringComparison.OrdinalIgnoreCase))
+                    CollectMaterialNodes(library, node);
+                else
+                    CollectTextureNodes(library, node);
+            }
+        }
+
+        private static void CollectMaterialNodes(LibraryData library, LUtfNode node)
+        {
+            foreach (var child in node.Children ?? [])
+            {
+                if (child.Children != null)
+                    library.Materials.Add(new MaterialResource(library.Id, child.Name, DetachResourceNode(child)));
+            }
+        }
+
+        private static void CollectTextureNodes(LibraryData library, LUtfNode node)
+        {
+            foreach (var child in node.Children ?? [])
+            {
+                if (child.Children != null)
+                    library.Textures.Add(new TextureResource(library.Id, child.Name, DetachResourceNode(child)));
+            }
+        }
+
+        private static LUtfNode DetachResourceNode(LUtfNode source)
+        {
+            source.Parent = null!;
+            return source;
+        }
+
+        private string? ResolveFile(string reference, string[] extensions)
+        {
+            var value = reference.Trim().Trim('"').Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar)
+                .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var candidate = Path.GetFullPath(Path.Combine(input, value));
+            if (File.Exists(candidate))
+                return candidate;
+
+            if (string.IsNullOrEmpty(Path.GetExtension(candidate)))
+            {
+                foreach (var extension in extensions)
+                {
+                    candidate = Path.ChangeExtension(Path.Combine(input, value), extension);
+                    if (File.Exists(candidate))
+                        return Path.GetFullPath(candidate);
+                }
+            }
+
+            return null;
+        }
+
+        private void ParseArchetypeIni(string path)
+        {
+            var lines = File.ReadAllLines(path);
+            var sections = ParseSections(lines);
+            foreach (var section in sections)
+            {
+                var kind = ArchetypeKind(Path.GetFileName(path), section.Name);
+                if (kind == null)
+                    continue;
+
+                var nickname = section.GetSingle(lines, "nickname");
+                var model = section.GetSingle(lines, "da_archetype");
+                if (string.IsNullOrWhiteSpace(nickname) || string.IsNullOrWhiteSpace(model))
+                    continue;
+
+                var entry = new ArchetypeEntry
+                {
+                    IniPath = path,
+                    SectionStart = section.StartLine,
+                    SectionName = section.Name,
+                    Kind = kind,
+                    Nickname = nickname,
+                    ModelReference = model,
+                    SolarType = section.GetSingle(lines, "type")
+                };
+                entry.MaterialLibraries.AddRange(section.GetAll(lines, "material_library"));
+                archetypes.Add(entry);
+            }
+        }
+
+        private static string? ArchetypeKind(string fileName, string section)
+        {
+            if (section.Equals("ship", StringComparison.OrdinalIgnoreCase) &&
+                fileName.Contains("shiparch", StringComparison.OrdinalIgnoreCase))
+                return "ship";
+            if (section.Equals("solar", StringComparison.OrdinalIgnoreCase) &&
+                fileName.Contains("solararch", StringComparison.OrdinalIgnoreCase))
+                return "solar";
+            if (section.Equals("simple", StringComparison.OrdinalIgnoreCase) &&
+                (fileName.Contains("shiparch", StringComparison.OrdinalIgnoreCase) ||
+                 fileName.Contains("solararch", StringComparison.OrdinalIgnoreCase)))
+                return "simple";
+            return null;
+        }
+
+        private static bool IsArchetypeIni(string path)
+        {
+            var name = Path.GetFileName(path);
+            return name.Contains("shiparch", StringComparison.OrdinalIgnoreCase) ||
+                   name.Contains("solararch", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static List<IniSection> ParseSections(string[] lines)
+        {
+            var sections = new List<IniSection>();
+            IniSection? current = null;
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var trimmed = lines[i].Trim();
+                if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+                {
+                    if (current != null)
+                        current.EndLine = i;
+                    current = new IniSection(trimmed[1..^1], i, lines.Length);
+                    sections.Add(current);
+                }
+            }
+            if (current != null)
+                current.EndLine = lines.Length;
+            return sections;
+        }
+
+        private static IEnumerable<IniKeySection> ParseKeySections(string path)
+        {
+            var lines = File.ReadAllLines(path);
+            var sections = ParseSections(lines);
+            foreach (var section in sections)
+            {
+                var values = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                for (var i = section.StartLine + 1; i < section.EndLine; i++)
+                {
+                    if (!TryParseKey(lines[i], out var key, out var value))
+                        continue;
+                    if (!values.TryGetValue(key, out var list))
+                        values[key] = list = [];
+                    list.Add(value);
+                }
+                yield return new IniKeySection(section.Name, values);
+            }
+        }
+
+        private static void ReplaceMaterialLibraryLines(List<string> lines, IniSection section, IReadOnlyList<string> libraries)
+        {
+            var replacements = new List<int>();
+            for (var i = section.StartLine + 1; i < section.EndLine && i < lines.Count; i++)
+            {
+                if (TryParseKey(lines[i], out var key, out _) && key.Equals("material_library", StringComparison.OrdinalIgnoreCase))
+                    replacements.Add(i);
+            }
+
+            if (replacements.Count > 0)
+            {
+                var first = replacements[0];
+                var prefix = lines[first][..(lines[first].IndexOf('m', StringComparison.OrdinalIgnoreCase) >= 0
+                    ? lines[first].IndexOf('m', StringComparison.OrdinalIgnoreCase)
+                    : 0)];
+                lines[first] = prefix + "material_library = " + libraries[0];
+                for (var i = replacements.Count - 1; i > 0; i--)
+                    lines.RemoveAt(replacements[i]);
+                for (var i = 1; i < libraries.Count; i++)
+                    lines.Insert(first + i, prefix + "material_library = " + libraries[i]);
+                return;
+            }
+
+            var insertAt = section.EndLine <= lines.Count ? section.EndLine : lines.Count;
+            for (var i = section.StartLine + 1; i < insertAt; i++)
+            {
+                if (TryParseKey(lines[i], out var key, out _) && key.Equals("da_archetype", StringComparison.OrdinalIgnoreCase))
+                {
+                    insertAt = i + 1;
+                    break;
+                }
+            }
+            for (var i = libraries.Count - 1; i >= 0; i--)
+                lines.Insert(insertAt, "material_library = " + libraries[i]);
+        }
+
+        private static bool TryParseKey(string line, out string key, out string value)
+        {
+            key = string.Empty;
+            value = string.Empty;
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0 || trimmed.StartsWith(';') || trimmed.StartsWith('#'))
+                return false;
+            var equals = trimmed.IndexOf('=');
+            if (equals < 1)
+                return false;
+            key = trimmed[..equals].Trim();
+            value = trimmed[(equals + 1)..].Trim();
+            return true;
+        }
+
+        private static bool IsTextureReference(string name) => name.ToLowerInvariant() switch
+        {
+            "dt_name" or "et_name" or "bt_name" or "nt_name" or "dm_name" or "dm0_name" or
+            "dm1_name" or "mt_name" or "rt_name" or "nm_name" => true,
+            _ => false
+        };
+
+        private static string SourceKey(string source, string name) => source + "\0" + name;
+
+        private static long NodeDataSize(LUtfNode node)
+        {
+            if (node.Children == null)
+                return node.Data?.LongLength ?? 0;
+            return node.Children.Sum(NodeDataSize);
+        }
+
+        private static LUtfNode NewIntermediate(LUtfNode parent, string name)
+        {
+            var node = new LUtfNode { Name = name, Parent = parent, Children = [] };
+            parent.Children.Add(node);
+            return node;
+        }
+
+        private static LUtfNode CloneNode(
+            LUtfNode source,
+            LUtfNode parent,
+            string? name = null,
+            IReadOnlyDictionary<string, string>? textureMap = null)
+        {
+            var clone = new LUtfNode { Name = name ?? source.Name, Parent = parent };
+            if (source.Children == null)
+            {
+                clone.Data = source.Data?.ToArray();
+                if (textureMap != null && IsTextureReference(source.Name) &&
+                    source.StringData is { } oldName && textureMap.TryGetValue(oldName, out var newName))
+                    clone.StringData = newName;
+                return clone;
+            }
+
+            clone.Children = [];
+            foreach (var child in source.Children)
+                clone.Children.Add(CloneNode(child, clone, null, textureMap));
+            return clone;
+        }
+    }
+
+    public sealed class DedupRunResult
+    {
+        public readonly bool Success;
+        public readonly string Report;
+        public readonly List<string> Errors;
+        public readonly List<string> Warnings;
+
+        public DedupRunResult(bool success, string report, List<string> errors, List<string> warnings)
+        {
+            Success = success;
+            Report = report;
+            Errors = errors;
+            Warnings = warnings;
+        }
+    }
+
+    private sealed class ArchetypeEntry
+    {
+        public string IniPath = string.Empty;
+        public int SectionStart;
+        public string SectionName = string.Empty;
+        public string Kind = string.Empty;
+        public string Nickname = string.Empty;
+        public string ModelReference = string.Empty;
+        public string? ModelPath;
+        public string? SolarType;
+        public List<string> MaterialLibraries = [];
+        public HashSet<string> Factions = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private sealed class ModelData
+    {
+        public readonly string SourcePath;
+        public readonly HashSet<string> LibraryIds = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> Groups = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> RequiredLibraries = new(StringComparer.OrdinalIgnoreCase);
+        public bool KeepEmbeddedLibraries;
+        public bool ExternalMaterialReferencesUnknown;
+        public string? KeepEmbeddedReason;
+
+        public ModelData(string sourcePath)
+        {
+            SourcePath = sourcePath;
+        }
+    }
+
+    private sealed class LibraryData
+    {
+        public readonly string Id;
+        public readonly List<TextureResource> Textures = [];
+        public readonly List<MaterialResource> Materials = [];
+
+        public LibraryData(string id)
+        {
+            Id = id;
+        }
+    }
+
+    private class ResourceBase
+    {
+        public readonly string SourceId;
+        public readonly string OriginalName;
+        public LUtfNode? Node;
+        public readonly long PayloadBytes;
+        public string Signature = string.Empty;
+        public string CanonicalName = string.Empty;
+
+        public ResourceBase(string sourceId, string originalName, LUtfNode node)
+        {
+            SourceId = sourceId;
+            OriginalName = originalName;
+            Node = node;
+            PayloadBytes = CountNodeData(node);
+        }
+
+        private static long CountNodeData(LUtfNode node)
+        {
+            if (node.Children == null)
+                return node.Data?.LongLength ?? 0;
+            return node.Children.Sum(CountNodeData);
+        }
+    }
+
+    private sealed class TextureResource : ResourceBase
+    {
+        public TextureResource(string sourceId, string originalName, LUtfNode node) : base(sourceId, originalName, node)
+        {
+        }
+    }
+
+    private sealed class MaterialResource : ResourceBase
+    {
+        public MaterialResource(string sourceId, string originalName, LUtfNode node) : base(sourceId, originalName, node)
+        {
+        }
+    }
+
+    private sealed class IniSection
+    {
+        public readonly string Name;
+        public readonly int StartLine;
+        public int EndLine;
+
+        public IniSection(string name, int startLine, int endLine)
+        {
+            Name = name;
+            StartLine = startLine;
+            EndLine = endLine;
+        }
+
+        public string? GetSingle(string[] lines, string key) => GetAll(lines, key).FirstOrDefault();
+
+        public IEnumerable<string> GetAll(string[] lines, string key)
+        {
+            for (var i = StartLine + 1; i < EndLine; i++)
+            {
+                if (TryParseKey(lines[i], out var found, out var value) &&
+                    found.Equals(key, StringComparison.OrdinalIgnoreCase))
+                    yield return value;
+            }
+        }
+
+        private static bool TryParseKey(string line, out string key, out string value)
+        {
+            key = string.Empty;
+            value = string.Empty;
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0 || trimmed.StartsWith(';') || trimmed.StartsWith('#'))
+                return false;
+            var equals = trimmed.IndexOf('=');
+            if (equals < 1)
+                return false;
+            key = trimmed[..equals].Trim();
+            value = trimmed[(equals + 1)..].Trim();
+            return true;
+        }
+    }
+
+    private sealed class IniKeySection
+    {
+        private readonly Dictionary<string, List<string>> values;
+
+        public IniKeySection(string name, Dictionary<string, List<string>> values)
+        {
+            Name = name;
+            this.values = values;
+        }
+
+        public string Name { get; }
+        public string? GetSingle(string key) => values.TryGetValue(key, out var result) ? result.FirstOrDefault() : null;
+        public IEnumerable<string> GetAll(string key) => values.TryGetValue(key, out var result) ? result : [];
+    }
+}
