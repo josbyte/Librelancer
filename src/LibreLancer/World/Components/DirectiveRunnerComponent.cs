@@ -82,7 +82,7 @@ public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
                 {
                     if (tgt.TryGetComponent<SDockableComponent>(out var sd))
                     {
-                        sd.StartDock(Parent, 0, world: world);
+                        sd.StartDock(Parent, 0, world: world, preferMoor: dock is DockMoorDirective);
                     }
                     else if (tgt.TryGetComponent<CLocalPlayerComponent>(out var pl))
                     {

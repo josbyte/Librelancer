@@ -268,18 +268,50 @@ namespace LibreLancer.Server.Components
 
         private readonly List<DockingAction> activeDockings = [];
 
-        private readonly List<(GameObject Ship, int RequestedIndex, GotoKind Kind, DockSphereType Type)> dockQueue = [];
+        private readonly List<(GameObject Ship, int RequestedIndex, GotoKind Kind, DockSphereType Type, bool MoorOnly)> dockQueue = [];
 
         public bool IsQueuedForDock(GameObject ship) =>
             dockQueue.Any(x => x.Ship == ship);
 
-        public void StartDock(GameObject obj, int index, GotoKind kind = GotoKind.Goto, GameWorld? world = null)
+        public bool HasCompatibleMoor(GameObject ship) =>
+            Action.Kind == DockKinds.Base &&
+            Enumerable.Range(0, DockPoints.Length).Any(i =>
+                IsMoor(DockPoints[i].DockSphere.Type) &&
+                HasDockHardpoint(i) &&
+                CanUseDockIndex(ship, i));
+
+        public bool IsNpcDockedOrUndocking(GameObject ship) =>
+            activeDockings.Any(x => x.Ship == ship && x.Moored) ||
+            undockers.Any(x => x.Ship == ship);
+
+        public void StartDock(
+            GameObject obj,
+            int index,
+            GotoKind kind = GotoKind.Goto,
+            GameWorld? world = null,
+            bool preferMoor = false)
         {
             if (activeDockings.Any(x => x.Ship == obj) || IsQueuedForDock(obj))
                 return;
 
             var dockIndex = index;
-            if (Action.Kind == DockKinds.Base && !HasCompatibleDockIndex(obj))
+            if (Action.Kind == DockKinds.Base && preferMoor)
+            {
+                if (!HasCompatibleMoor(obj))
+                {
+                    FLLog.Warning(
+                        "Docking",
+                        $"{obj.Nickname ?? obj.NetID.ToString()} cannot dock at {Parent.Nickname}: no compatible moor");
+                    return;
+                }
+
+                if (!TryGetAvailableDockIndex(obj, -1, out dockIndex, moorOnly: true))
+                {
+                    QueueDock(obj, -1, kind, moorOnly: true);
+                    return;
+                }
+            }
+            else if (Action.Kind == DockKinds.Base && !HasCompatibleDockIndex(obj))
             {
                 var dockType = GetDockTypeForShip(obj);
                 FLLog.Warning(
@@ -325,13 +357,13 @@ namespace LibreLancer.Server.Components
                 ap.StartDock(Parent, kind, index);
         }
 
-        private void QueueDock(GameObject ship, int requestedIndex, GotoKind kind)
+        private void QueueDock(GameObject ship, int requestedIndex, GotoKind kind, bool moorOnly = false)
         {
             if (activeDockings.Any(x => x.Ship == ship) || IsQueuedForDock(ship))
                 return;
 
-            var dockType = GetQueueDockType(ship, requestedIndex);
-            var entry = (ship, requestedIndex, kind, dockType);
+            var dockType = moorOnly ? GetDockTypeForShip(ship) : GetQueueDockType(ship, requestedIndex);
+            var entry = (ship, requestedIndex, kind, dockType, moorOnly);
             if (!ship.TryGetComponent<SPlayerComponent>(out _))
             {
                 dockQueue.Add(entry);
@@ -347,21 +379,32 @@ namespace LibreLancer.Server.Components
                 dockQueue.Insert(insert, entry);
         }
 
-        private bool TryGetAvailableDockIndex(GameObject ship, int requestedIndex, out int index)
+        private bool TryGetAvailableDockIndex(
+            GameObject ship,
+            int requestedIndex,
+            out int index,
+            bool moorOnly = false)
         {
             index = requestedIndex;
-            if (CanUseDockIndex(ship, requestedIndex) &&
+            if ((!moorOnly ||
+                 requestedIndex >= 0 &&
+                 requestedIndex < DockPoints.Length &&
+                 IsMoor(DockPoints[requestedIndex].DockSphere.Type) &&
+                 HasDockHardpoint(requestedIndex)) &&
+                CanUseDockIndex(ship, requestedIndex) &&
                 IsDockIndexAvailableForDocking(requestedIndex))
                 return true;
 
-            if (IsDockingRingIndex(requestedIndex))
+            if (!moorOnly && IsDockingRingIndex(requestedIndex))
             {
                 return false;
             }
 
             for (int i = 0; i < DockPoints.Length; i++)
             {
-                if (CanUseDockIndex(ship, i) &&
+                if ((!moorOnly || IsMoor(DockPoints[i].DockSphere.Type)) &&
+                    (!moorOnly || HasDockHardpoint(i)) &&
+                    CanUseDockIndex(ship, i) &&
                     IsDockIndexAvailableForDocking(i))
                 {
                     index = i;
@@ -371,6 +414,11 @@ namespace LibreLancer.Server.Components
 
             return false;
         }
+
+        private bool HasDockHardpoint(int index) =>
+            index >= 0 &&
+            index < DockPoints.Length &&
+            Parent.GetHardpoint(DockPoints[index].DockSphere.Hardpoint) != null;
 
         private DockSphereType GetQueueDockType(GameObject ship, int requestedIndex) =>
             IsDockingRingIndex(requestedIndex) ? DockSphereType.ring : GetDockTypeForShip(ship);
@@ -395,7 +443,11 @@ namespace LibreLancer.Server.Components
                     continue;
                 }
 
-                if (!TryGetAvailableDockIndex(queued.Ship, queued.RequestedIndex, out var index))
+                if (!TryGetAvailableDockIndex(
+                        queued.Ship,
+                        queued.RequestedIndex,
+                        out var index,
+                        queued.MoorOnly))
                 {
                     i++;
                     continue;
@@ -442,9 +494,9 @@ namespace LibreLancer.Server.Components
             FLLog.Debug("Docking", $"{dock.Ship} entering docking ring {DockPoints[dock.Dock].DockSphere.Hardpoint}");
         }
 
-        private void StartTradelane(GameObject ship, string tlHardpoint)
+        private void StartTradelane(GameObject ship, string tlHardpoint, bool fullSpeed = false)
         {
-            var movement = new STradelaneMoveComponent(ship, Parent, tlHardpoint);
+            var movement = new STradelaneMoveComponent(ship, Parent, tlHardpoint, fullSpeed);
             ship.AddComponent(movement);
 
             if (Parent.TryGetComponent<ShipPhysicsComponent>(out var component))
@@ -521,7 +573,7 @@ namespace LibreLancer.Server.Components
             !IsUndockIndexBusy(index) &&
             TryGetSpawnPoint(index, out _);
 
-        public bool TryGetUndockIndex(out int index)
+        public bool TryGetUndockIndex(out int index, bool allowMoors = true)
         {
             index = 0;
             if (DockPoints.Length == 0)
@@ -535,6 +587,9 @@ namespace LibreLancer.Server.Components
 
             for (int i = 0; i < DockPoints.Length; i++)
             {
+                if (!allowMoors && IsMoor(DockPoints[i].DockSphere.Type))
+                    continue;
+
                 if (IsUndockIndexAvailable(i))
                 {
                     index = i;
@@ -545,9 +600,9 @@ namespace LibreLancer.Server.Components
             return false;
         }
 
-        public bool TryReserveUndockIndex(out int index)
+        public bool TryReserveUndockIndex(out int index, bool allowMoors = true)
         {
-            if (!TryGetUndockIndex(out index))
+            if (!TryGetUndockIndex(out index, allowMoors))
             {
                 return false;
             }
@@ -778,6 +833,27 @@ namespace LibreLancer.Server.Components
                     world.Server!.DeactivateLane(Parent, false);
                 }
             }
+        }
+
+        public bool StartTradelaneArrival(GameObject ship, string tlHardpoint, GameWorld world)
+        {
+            if (Action.Kind != DockKinds.Tradelane ||
+                (!tlHardpoint.Equals("HpLeftLane", StringComparison.OrdinalIgnoreCase) &&
+                 !tlHardpoint.Equals("HpRightLane", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            var index = Array.FindIndex(DockPoints, x =>
+                x.DockSphere.Hardpoint.Equals(tlHardpoint, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                return false;
+            }
+
+            TriggerAnimation(index, world, true);
+            StartTradelane(ship, tlHardpoint, fullSpeed: true);
+            return true;
         }
     }
 }

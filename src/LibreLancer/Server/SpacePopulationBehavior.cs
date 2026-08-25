@@ -47,11 +47,18 @@ public partial class SpacePopulationManager
             return BuildRetirementDirectives(retirementDockable);
 
         var behavior = group.Encounter.FormationDefinition?.Behavior ?? EncounterBehavior.wander;
+        if (!group.MoorCompleted)
+        {
+            var moorDirectives = BuildMoorDirectives(group, currentPosition);
+            if (moorDirectives.Length > 0)
+                return moorDirectives;
+        }
+
         return behavior switch
         {
             EncounterBehavior.patrol_path => BuildPathDirectives(group, GotoKind.GotoCruise, 100, PatrolPathWaypointRange),
             EncounterBehavior.trade when IsPatrol(group.State.Zone) => BuildPathDirectives(group, GotoKind.GotoCruise, 100, PatrolPathWaypointRange),
-            EncounterBehavior.trade => BuildTradeDirectives(group.State, currentPosition, group.ArrivalObject),
+            EncounterBehavior.trade => BuildPathDirectives(group, GotoKind.GotoCruise, 100),
             _ => BuildWanderDirectives(group.State.Zone)
         };
     }
@@ -113,11 +120,19 @@ public partial class SpacePopulationManager
         return directives;
     }
 
-    private MissionDirective[] BuildTradeDirectives(ZoneState state, Vector3 currentPosition, string? excludeDockable)
+    private MissionDirective[] BuildMoorDirectives(PopGroup group, Vector3 currentPosition)
     {
-        var dockable = FindDockable(currentPosition, excludeDockable);
+        var leader = group.Ships.FirstOrDefault(Alive);
+        var dockable = leader == null
+            ? null
+            : FindMoorDockable(
+                currentPosition,
+                leader,
+                group.ArrivalObject,
+                group.LastMoorDockable);
         if (!string.IsNullOrWhiteSpace(dockable?.Nickname))
         {
+            group.LastMoorDockable = dockable.Nickname;
             return
             [
                 new GotoShipDirective
@@ -127,11 +142,11 @@ public partial class SpacePopulationManager
                     Range = 750,
                     MaxThrottle = 100
                 },
-                new DockDirective { Target = dockable.Nickname! }
+                new DockMoorDirective { Target = dockable.Nickname! }
             ];
         }
 
-        return BuildPathDirectives(state, GotoKind.GotoCruise, 100);
+        return [];
     }
 
     private MissionDirective[] BuildPathDirectives(
@@ -302,20 +317,32 @@ public partial class SpacePopulationManager
         return nearest;
     }
 
-    private GameObject? FindDockable(Vector3 currentPosition, string? excludeNickname = null)
+    private GameObject? FindMoorDockable(
+        Vector3 currentPosition,
+        GameObject ship,
+        string? excludeNickname = null,
+        string? previousDockable = null)
     {
         GameObject? nearest = null;
         var nearestDistance = float.MaxValue;
         foreach (var obj in world.GameWorld.Objects)
         {
-            if (obj.SystemObject == null ||
+            if (string.IsNullOrWhiteSpace(obj.Nickname) ||
+                obj.SystemObject == null ||
                 (obj.Flags & GameObjectFlags.Exists) != GameObjectFlags.Exists ||
-                !obj.TryGetComponent<SDockableComponent>(out _))
+                !obj.TryGetComponent<SDockableComponent>(out var dockable) ||
+                dockable.Action.Kind != DockKinds.Base ||
+                !dockable.HasCompatibleMoor(ship))
             {
                 continue;
             }
             if (!string.IsNullOrWhiteSpace(excludeNickname) &&
                 excludeNickname.Equals(obj.Nickname, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (!string.IsNullOrWhiteSpace(previousDockable) &&
+                previousDockable.Equals(obj.Nickname, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -354,7 +381,26 @@ public partial class SpacePopulationManager
                 continue;
             var runner = leader.GetComponent<DirectiveRunnerComponent>();
             if (runner is { Active: false })
+            {
+                if (leader.TryGetComponent<SDockableComponent>(out var dockable) &&
+                    dockable.IsNpcDockedOrUndocking(leader))
+                {
+                    continue;
+                }
+
+                if (leader.TryGetComponent<AutopilotComponent>(out var autopilot) &&
+                    autopilot.CurrentBehavior == AutopilotBehaviors.Undock)
+                {
+                    continue;
+                }
+
+                if (group.LastMoorDockable != null)
+                {
+                    group.MoorCompleted = true;
+                }
+
                 AssignDirectives(group);
+            }
         }
     }
 }

@@ -21,10 +21,17 @@ namespace LibreLancer.Server.Components
         private GameObject currenttradelane;
         private string lane;
 
-        public STradelaneMoveComponent(GameObject parent, GameObject tradelane, string lane) : base(parent)
+        public STradelaneMoveComponent(
+            GameObject parent,
+            GameObject tradelane,
+            string lane,
+            bool fullSpeed = false) : base(parent)
         {
             currenttradelane = tradelane;
             this.lane = lane;
+            if (fullSpeed)
+                // Population arrivals are already in the lane and should not accelerate into it.
+                totalTime = 3;
         }
 
         private bool TryGetMissionRuntime([MaybeNullWhen(false)] out MissionRuntime msn, out bool player)

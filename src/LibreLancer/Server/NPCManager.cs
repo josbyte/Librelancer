@@ -143,7 +143,8 @@ namespace LibreLancer.Server
             MissionRuntime? msn = null,
             bool registerNpc = true,
             bool arrivalIndexReserved = false,
-            IEnumerable<GameObject>? neutralTo = null
+            IEnumerable<GameObject>? neutralTo = null,
+            string? arrivalLane = null
             )
         {
             var ship = World.Server.GameData.Items.Ships.Get(loadout.Archetype);
@@ -152,7 +153,7 @@ namespace LibreLancer.Server
             if (spawnPoint?.TryGetComponent<SDockableComponent>(out sdock) ?? false)
             {
                 var reservedHere = arrivalIndexReserved;
-                if (!reservedHere)
+                if (arrivalLane == null && !reservedHere)
                 {
                     var reserved = arrivalIndex == 0
                         ? sdock.TryReserveUndockIndex(out arrivalIndex)
@@ -168,12 +169,12 @@ namespace LibreLancer.Server
                     }
                 }
 
-                if (sdock != null && sdock.TryGetSpawnPoint(arrivalIndex, out var p))
+                if (arrivalLane == null && sdock != null && sdock.TryGetSpawnPoint(arrivalIndex, out var p))
                 {
                     position = p.Position;
                     orient = p.Orientation;
                 }
-                else if (sdock != null)
+                else if (arrivalLane == null && sdock != null)
                 {
                     if (reservedHere)
                         sdock.ReleaseUndockIndex(arrivalIndex);
@@ -229,8 +230,16 @@ namespace LibreLancer.Server
             World.OnNPCSpawn(obj);
             if (sdock != null)
             {
-                sdock.UndockShip(obj, World.GameWorld, arrivalIndex);
-                obj.GetComponent<AutopilotComponent>()!.Undock(spawnPoint!, arrivalIndex);
+                if (arrivalLane != null)
+                {
+                    if (!sdock.StartTradelaneArrival(obj, arrivalLane, World.GameWorld))
+                        FLLog.Warning("NPC", $"Could not start tradelane arrival {arrivalLane} for {arrivalObj}");
+                }
+                else
+                {
+                    sdock.UndockShip(obj, World.GameWorld, arrivalIndex);
+                    obj.GetComponent<AutopilotComponent>()!.Undock(spawnPoint!, arrivalIndex);
+                }
             }
             if (registerNpc && nickname != null)
             {

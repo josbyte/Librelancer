@@ -269,10 +269,10 @@ public partial class SpacePopulationManager
         {
             var arrivalIndex = spawn.ArrivalIndex;
             var reservedArrival = false;
-            if (arrivalDockable != null)
+            if (arrivalDockable != null && spawn.ArrivalLane == null)
             {
                 reservedArrival = spawn.ArrivalIndex == 0
-                    ? arrivalDockable.TryReserveUndockIndex(out arrivalIndex)
+                    ? arrivalDockable.TryReserveUndockIndex(out arrivalIndex, allowMoors: false)
                     : arrivalDockable.TryReserveUndockIndex(arrivalIndex);
 
                 if (!reservedArrival)
@@ -313,7 +313,8 @@ public partial class SpacePopulationManager
                 null,
                 false,
                 reservedArrival,
-                neutralTo);
+                neutralTo,
+                spawn.ArrivalLane);
             group.Ships.Add(obj);
         }
 

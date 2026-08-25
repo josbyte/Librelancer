@@ -5,6 +5,7 @@ using System.Numerics;
 using LibreLancer.Data.GameData.World;
 using LibreLancer.Data.Schema.Missions;
 using LibreLancer.Data.Schema.Solar;
+using LibreLancer.Data.Schema.Ships;
 using LibreLancer.Server.Components;
 using LibreLancer.World;
 using Zone = LibreLancer.Data.GameData.World.Zone;
@@ -86,6 +87,7 @@ public partial class SpacePopulationManager
         }
 
         var preferObjectArrival = info.FormationDefinition?.Behavior == EncounterBehavior.trade;
+        var avoidBaseArrivals = UsesMoorCapableShip(info);
         if (!preferObjectArrival &&
             TryFindFreeSpaceSpawnLocation(state.Zone, arrivalTargets, players, zoneCreationDistance, allowCloseSpawn, out spawn))
         {
@@ -98,19 +100,30 @@ public partial class SpacePopulationManager
             players,
             zoneCreationDistance,
             allowCloseSpawn,
+            avoidBaseArrivals,
             out var arrivalObject,
-            out var arrivalIndex))
+            out var arrivalIndex,
+            out var arrivalLane,
+            out var arrivalPosition,
+            out var arrivalOrientation))
         {
             spawn = new SpawnLocation(
-                arrivalObject.WorldTransform.Position,
-                arrivalObject.WorldTransform.Orientation,
+                arrivalPosition,
+                arrivalOrientation,
                 arrivalObject.Nickname,
-                arrivalIndex);
+                arrivalIndex,
+                ArrivalLane: arrivalLane);
             return true;
         }
 
-        if (preferObjectArrival &&
-            TryFindFreeSpaceSpawnLocation(state.Zone, arrivalTargets, players, zoneCreationDistance, allowCloseSpawn, out spawn))
+        if ((preferObjectArrival || avoidBaseArrivals) &&
+            TryFindFreeSpaceSpawnLocation(
+                state.Zone,
+                arrivalTargets | ArrivalTargets.Cruise,
+                players,
+                zoneCreationDistance,
+                allowCloseSpawn,
+                out spawn))
         {
             return true;
         }
@@ -123,6 +136,10 @@ public partial class SpacePopulationManager
         var behavior = info.FormationDefinition?.Behavior ?? EncounterBehavior.wander;
         return behavior == EncounterBehavior.patrol_path || IsPatrol(state.Zone);
     }
+
+    private static bool UsesMoorCapableShip(EncounterInfo info) =>
+        info.Ships.Any(x => x.Ship.Ship?.MissionProperty is
+            ShipMissionProperty.can_use_med_moors or ShipMissionProperty.can_use_large_moors);
 
     private bool TryFindFreeSpaceSpawnLocation(
         Zone zone,
@@ -149,11 +166,18 @@ public partial class SpacePopulationManager
         GameObject[] players,
         float zoneCreationDistance,
         bool allowCloseSpawn,
+        bool avoidBaseArrivals,
         out GameObject arrivalObject,
-        out int arrivalIndex)
+        out int arrivalIndex,
+        out string? arrivalLane,
+        out Vector3 arrivalPosition,
+        out Quaternion arrivalOrientation)
     {
         arrivalObject = null!;
         arrivalIndex = 0;
+        arrivalLane = null;
+        arrivalPosition = default;
+        arrivalOrientation = Quaternion.Identity;
         if (players.Length == 0 || (targets & ArrivalTargets.Objects) == 0)
             return false;
 
@@ -169,31 +193,168 @@ public partial class SpacePopulationManager
             if (string.IsNullOrWhiteSpace(obj.Nickname) ||
                 obj.SystemObject == null ||
                 !Alive(obj) ||
-                !zone.ContainsPoint(obj.WorldTransform.Position) ||
-                IsInsideRandomMissionNoSpawnZone(obj.WorldTransform.Position) ||
                 !obj.TryGetComponent<SDockableComponent>(out var dockable) ||
                 dockable.DockPoints.Length == 0 ||
-                !dockable.TryGetUndockIndex(out var dockIndex) ||
                 !ObjectMatchesArrival(obj, dockable, targets))
             {
                 continue;
             }
 
+            var isTradelane = dockable.Action.Kind == DockKinds.Tradelane;
+            if (avoidBaseArrivals && dockable.Action.Kind == DockKinds.Base)
+            {
+                continue;
+            }
+
+            if (!isTradelane &&
+                (!zone.ContainsPoint(obj.WorldTransform.Position) ||
+                 IsInsideRandomMissionNoSpawnZone(obj.WorldTransform.Position)))
+            {
+                continue;
+            }
+
+            var dockIndex = 0;
+            string? lane = null;
             var distance = DistanceToNearestPlayer(obj.WorldTransform.Position, players);
+            var proximity = distance;
+            var candidatePosition = obj.WorldTransform.Position;
+            var candidateOrientation = obj.WorldTransform.Orientation;
+
+            if (isTradelane)
+            {
+                if (!TryFindTradelaneDirection(
+                        obj,
+                        zone,
+                        dockable,
+                        players,
+                        minDistance,
+                        searchDistance,
+                        out lane,
+                        out candidatePosition,
+                        out candidateOrientation,
+                        out distance,
+                        out proximity))
+                {
+                    continue;
+                }
+            }
+            else if (!dockable.TryGetUndockIndex(out dockIndex, allowMoors: false))
+            {
+                continue;
+            }
+
             if (distance < minDistance || distance > searchDistance)
                 continue;
 
-            var score = distance;
-            score += random.NextSingle() * 250f;
+            var score = isTradelane
+                ? proximity
+                : distance + random.NextSingle() * 250f;
             if (score < bestScore)
             {
                 bestScore = score;
                 arrivalObject = obj;
                 arrivalIndex = dockIndex;
+                arrivalLane = lane;
+                arrivalPosition = candidatePosition;
+                arrivalOrientation = candidateOrientation;
             }
         }
 
         return arrivalObject != null;
+    }
+
+    private bool TryFindTradelaneDirection(
+        GameObject source,
+        Zone zone,
+        SDockableComponent dockable,
+        GameObject[] players,
+        float minDistance,
+        float searchDistance,
+        out string lane,
+        out Vector3 spawnPosition,
+        out Quaternion spawnOrientation,
+        out float distance,
+        out float proximity)
+    {
+        lane = string.Empty;
+        spawnPosition = default;
+        spawnOrientation = Quaternion.Identity;
+        distance = float.MaxValue;
+        proximity = float.MaxValue;
+        var bestDistance = float.MaxValue;
+        var desiredSpawnDistance = (minDistance + searchDistance) * 0.5f;
+
+        foreach (var candidate in new[]
+        {
+            (Lane: "HpRightLane", Target: dockable.Action.Target),
+            (Lane: "HpLeftLane", Target: dockable.Action.TargetLeft)
+        })
+        {
+            if (string.IsNullOrWhiteSpace(candidate.Target) ||
+                source.GetHardpoint(candidate.Lane) is not { } sourceHardpoint ||
+                world.GameWorld.GetObject(candidate.Target) is not { } target ||
+                target.GetHardpoint(candidate.Lane) is not { } targetHardpoint)
+            {
+                continue;
+            }
+
+            var sourceTransform = sourceHardpoint.Transform * source.WorldTransform;
+            var targetTransform = targetHardpoint.Transform * target.WorldTransform;
+            var laneVector = targetTransform.Position - sourceTransform.Position;
+            var laneLength = laneVector.Length();
+            if (laneLength <= 1)
+            {
+                continue;
+            }
+
+            var laneDirection = laneVector / laneLength;
+            foreach (var player in players)
+            {
+                var playerPosition = player.WorldTransform.Position;
+                var playerAlongLane = Vector3.Dot(playerPosition - sourceTransform.Position, laneDirection);
+                // A lane pointing away is skipped here; its opposite directed lane is
+                // evaluated from the neighboring ring as another candidate.
+                if (playerAlongLane <= 0)
+                {
+                    continue;
+                }
+
+                var closestAlongLane = Math.Clamp(playerAlongLane, 0, laneLength);
+                var closestPoint = sourceTransform.Position + laneDirection * closestAlongLane;
+                var laneProximity = Vector3.Distance(playerPosition, closestPoint);
+                var availableBehindPlayer = closestAlongLane;
+                if (availableBehindPlayer < minDistance)
+                {
+                    continue;
+                }
+
+                var spawnOffset = Math.Min(desiredSpawnDistance, availableBehindPlayer);
+                var point = closestPoint - laneDirection * spawnOffset;
+                var spawnDistance = Vector3.Distance(point, playerPosition);
+                if (IsInsideRandomMissionNoSpawnZone(point) ||
+                    !zone.ContainsPoint(point) ||
+                    spawnDistance < minDistance ||
+                    spawnDistance > searchDistance)
+                {
+                    continue;
+                }
+
+                if (laneProximity > proximity + 0.01f ||
+                    laneProximity <= proximity + 0.01f && spawnDistance >= bestDistance)
+                {
+                    continue;
+                }
+
+                proximity = laneProximity;
+                bestDistance = spawnDistance;
+                lane = candidate.Lane;
+                spawnPosition = point;
+                spawnOrientation = QuaternionEx.LookAt(point, targetTransform.Position);
+                distance = spawnDistance;
+            }
+        }
+
+        return lane.Length > 0;
     }
 
     private static bool ObjectMatchesArrival(GameObject obj, SDockableComponent dockable, ArrivalTargets targets)

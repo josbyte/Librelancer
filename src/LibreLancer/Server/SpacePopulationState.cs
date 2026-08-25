@@ -30,6 +30,8 @@ public partial class SpacePopulationManager
         public readonly HashSet<string> PopulationClasses = new(System.StringComparer.OrdinalIgnoreCase);
         public double AgeSeconds;
         public string? ArrivalObject;
+        public string? LastMoorDockable;
+        public bool MoorCompleted;
         public float PersistDistance;
         public int PathIndex = state.PathIndex;
         public Vector3? InitialPathTarget;
@@ -44,7 +46,8 @@ public partial class SpacePopulationManager
         int ArrivalIndex,
         int PathIndex = -1,
         Vector3? InitialPathTarget = null,
-        float PersistDistance = 0);
+        float PersistDistance = 0,
+        string? ArrivalLane = null);
 
     private readonly record struct PopulationContext(GameObject[] Players, int Density);
 }
