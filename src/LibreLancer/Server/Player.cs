@@ -1262,8 +1262,9 @@ namespace LibreLancer.Server
                 {
                     Position = obj.Position;
                     Orientation = obj.Rotation;
-                    Position = Vector3.Transform(new Vector3(0, 0, 500), Orientation) +
-                               obj.Position; // TODO: This is bad
+                    var radius = obj.Archetype?.SolarRadius ?? 0;
+                    var offset = MathF.Max(500, radius + DefaultVisitDistance);
+                    Position = Vector3.Transform(new Vector3(0, 0, offset), Orientation) + obj.Position;
                 }
 
                 Baseside = null;
